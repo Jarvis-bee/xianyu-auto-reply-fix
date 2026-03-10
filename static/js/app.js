@@ -14883,9 +14883,17 @@ let remoteVersionInfo = null;
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.5.3',
+    version: 'v1.5.4',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.5.4',
+            date: '2026-03-10',
+            updates: [
+                '【修复】补充 .gitattributes 行尾规则，统一 Python、JS、HTML、CSS 等热更新相关文本文件使用 LF',
+                '【修复】避免因 CRLF/LF 行尾差异导致同版本下仍被误判为可热更新文件'
+            ]
+        },
         {
             version: 'v1.5.3',
             date: '2026-03-10',
