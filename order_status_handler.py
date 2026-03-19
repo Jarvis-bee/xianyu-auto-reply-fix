@@ -278,6 +278,10 @@ class OrderStatusHandler:
         exact_mapping = {
             '[买家确认收货，交易成功]': 'completed',
             '[你已确认收货，交易成功]': 'completed',
+            '买家已确认收货，交易成功': 'completed',
+            '已确认收货，交易成功': 'completed',
+            '快给ta一个评价吧~': 'completed',
+            '快给ta一个评价吧～': 'completed',
             '[你已发货]': 'shipped',
             '你已发货': 'shipped',
             '[你已发货，请等待买家确认收货]': 'shipped',
@@ -311,6 +315,8 @@ class OrderStatusHandler:
         if '退款中' in normalized or '退货退款' in normalized or '退款关闭' in normalized:
             return 'refunding'
         if '买家确认收货' in normalized:
+            return 'completed'
+        if '快给ta一个评价吧' in normalized:
             return 'completed'
         if '已发货_卖家' in normalized or '等待买家收货' in normalized:
             return 'shipped'

@@ -1461,11 +1461,45 @@ class OrderDetailFetcher:
                 ('pending_payment', ['待付款', '等待买家付款']),
             ]
 
+        if source == 'button_group':
+            status_patterns = [
+                ('cancelled', ['关闭订单', '订单关闭']),
+                ('refunding', ['退款中', '退款详情']),
+                ('completed', ['交易成功', '已完成']),
+                ('shipped', ['提醒收货', '延长收货', '查看物流', '已发货', '确认收货']),
+                ('pending_ship', ['去发货', '立即发货', '待发货']),
+                ('pending_payment', ['修改价格', '等待付款']),
+            ]
+
         matched_statuses: Dict[str, list] = {}
         for status, patterns in status_patterns:
             matched_patterns = [pattern for pattern in patterns if pattern in normalized_text]
             if matched_patterns:
                 matched_statuses[status] = matched_patterns
+
+        if source == 'button_group':
+            completed_signals = []
+            if '去评价' in normalized_text:
+                completed_signals.append('去评价')
+            if '查看钱款' in normalized_text:
+                completed_signals.append('查看钱款')
+            if '删除订单' in normalized_text:
+                completed_signals.append('删除订单')
+
+            if {'去评价', '查看钱款'}.issubset(set(completed_signals)):
+                matched_statuses['completed'] = completed_signals
+
+        if source == 'body':
+            completed_signals = []
+            if '快给ta一个评价吧~' in normalized_text or '快给ta一个评价吧～' in normalized_text:
+                completed_signals.append('快给ta一个评价吧')
+            if '查看钱款' in normalized_text:
+                completed_signals.append('查看钱款')
+            if '去评价' in normalized_text:
+                completed_signals.append('去评价')
+
+            if '快给ta一个评价吧' in ''.join(completed_signals) and ('查看钱款' in completed_signals or '去评价' in completed_signals):
+                matched_statuses['completed'] = completed_signals
 
         return matched_statuses
 
@@ -1749,6 +1783,12 @@ class OrderDetailFetcher:
                 if self._get_status_priority(candidate_status) > self._get_status_priority(button_status):
                     button_status = candidate_status
 
+            button_group_status = 'unknown'
+            if button_texts:
+                button_group_status = self._extract_status_from_text(' | '.join(button_texts), source='button_group')
+                if self._get_status_priority(button_group_status) > self._get_status_priority(button_status):
+                    button_status = button_group_status
+
             # 先解析选择器结果
             if status_text:
                 parsed_from_selector = self._extract_status_from_text(status_text, source='selector')
@@ -1763,7 +1803,7 @@ class OrderDetailFetcher:
 
             logger.info(
                 f"订单状态解析候选: selector={parsed_from_selector} ({status_text or 'empty'}), "
-                f"button={button_status} ({button_texts or []})"
+                f"button={button_status} ({button_texts or []}), button_group={button_group_status}"
             )
 
             if preferred_status != 'unknown':
