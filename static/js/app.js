@@ -15809,13 +15809,10 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v1.7.5';
+const DEFAULT_VERSION = 'v1.8.0';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
-
-// 远程版本检查API地址（暂时禁用）
-// const VERSION_CHECK_URL = 'http://116.196.116.76/version.php';
 
 // 缓存远程版本信息
 let remoteVersionInfo = null;
@@ -15923,9 +15920,22 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v1.7.5',
+    version: 'v1.8.0',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v1.8.0',
+            date: '2026-04-01',
+            updates: [
+                '【新功能】风控日志升级为结构化会话链路，覆盖滑块验证、Token 过期、账密登录和扫码刷新，支持统一追踪结果、场景与脱敏元数据',
+                '【优化】风控看板重构为结构化会话统计，新增更准确的滑块成功/失败会话统计、筛选能力与响应式详情展示，排查风控更直观',
+                '【优化】滑块验证反检测全面增强，加入稳定指纹配置、拟人轨迹、Cookie 预热与多轮重试策略，提升验证通过率与稳定性',
+                '【修复】手动刷新、扫码登录与密码登录流程增加互斥保护、失败退避和状态收口，减少刷新互踩、扫码回滚误判与登录风控残留',
+                '【修复】扫码/密码登录链路补强浏览器侧 Cookie 稳定化、前置登录态校验和人脸/滑块兜底判断，登录成功判定更可靠',
+                '【优化】图片上传新增错误类型追踪，调用方可按错误原因给出更准确的提示与处理',
+                '【修复】商品管理区分“同步商品”和“刷新列表”，同步指定页/所有页时会强制拉取已有商品的最新详情，避免本地缓存长期陈旧'
+            ]
+        },
         {
             version: 'v1.7.5',
             date: '2026-03-24',
