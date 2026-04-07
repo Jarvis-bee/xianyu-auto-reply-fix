@@ -39,6 +39,11 @@ let ordersStreamAbortController = null;
 let ordersStreamReconnectTimer = null;
 let ordersStreamRetryCount = 0;
 let ordersStreamShouldRun = false;
+let orderHistorySyncModalInstance = null;
+let orderHistorySyncPollingTimer = null;
+let activeOrderHistorySyncJobId = '';
+let orderHistorySyncNotifiedJobId = '';
+let orderHistorySyncAccounts = [];
 let loadingRequestCount = 0;
 let loadingShowTimer = null;
 const LOADING_SHOW_DELAY = 120;
@@ -627,7 +632,7 @@ async function loadOrderDashboardMetrics() {
                 }
             }
 
-            if (isTodayOrder(order?.created_at)) {
+            if (isTodayOrder(getEffectiveOrderSalesTime(order))) {
                 todayOrders++;
             }
         });
@@ -1237,6 +1242,13 @@ const beijingMinuteFormatter = new Intl.DateTimeFormat('zh-CN', {
     hourCycle: 'h23'
 });
 
+const beijingDateFormatter = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+});
+
 const beijingSecondFormatter = new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai',
     year: 'numeric',
@@ -1277,6 +1289,31 @@ function formatBeijingDateTimeWithSeconds(dateInput) {
     return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
+function getBeijingDateKey(dateInput) {
+    const date = parseUtcDateTime(dateInput);
+    if (!date) return '';
+
+    const parts = {};
+    beijingDateFormatter.formatToParts(date).forEach(part => {
+        if (part.type !== 'literal') {
+            parts[part.type] = part.value;
+        }
+    });
+
+    return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function getEffectiveOrderSalesTime(order) {
+    const platformPaidAt = String(order?.platform_paid_at || '').trim();
+    if (platformPaidAt) return platformPaidAt;
+
+    const platformCreatedAt = String(order?.platform_created_at || '').trim();
+    if (platformCreatedAt) return platformCreatedAt;
+
+    const createdAt = String(order?.created_at || '').trim();
+    return createdAt || null;
+}
+
 function formatAboutRuntimeTime(displayValue, rawTimestamp) {
     const displayText = typeof displayValue === 'string' ? displayValue.trim() : '';
     if (displayText) {
@@ -1302,15 +1339,10 @@ function formatAboutRuntimeTime(displayValue, rawTimestamp) {
 }
 
 function isTodayOrder(createdAt) {
-    const orderDate = parseUtcDateTime(createdAt);
-    if (!orderDate) return false;
+    const orderDateKey = getBeijingDateKey(createdAt);
+    if (!orderDateKey) return false;
 
-    const now = new Date();
-    return (
-        orderDate.getFullYear() === now.getFullYear() &&
-        orderDate.getMonth() === now.getMonth() &&
-        orderDate.getDate() === now.getDate()
-    );
+    return orderDateKey === getBeijingDateKey(new Date());
 }
 
 function updateDashboardOrderMetrics(metrics) {
@@ -13507,30 +13539,12 @@ async function loadOrderCookieFilter() {
         const select = document.getElementById('orderCookieFilter');
         const previousValue = select ? select.value : '';
 
-        const response = await fetch(`${apiBase}/api/orders`, {
-            headers: {
-                'Authorization': `Bearer ${authToken}`
-            }
-        });
+        const accounts = await fetchOrderSyncAccounts(true);
+        if (select) {
+            renderOrderAccountOptions(select, accounts, { includeAllOption: true });
 
-        const data = await response.json();
-        if (data.success && data.data) {
-            // 提取唯一的cookie_id
-            const cookieIds = [...new Set(data.data.map(order => order.cookie_id).filter(id => id))];
-
-            if (select) {
-                select.innerHTML = '<option value="">所有账号</option>';
-
-                cookieIds.forEach(cookieId => {
-                    const option = document.createElement('option');
-                    option.value = cookieId;
-                    option.textContent = cookieId;
-                    select.appendChild(option);
-                });
-
-                if (previousValue && cookieIds.includes(previousValue)) {
-                    select.value = previousValue;
-                }
+            if (previousValue && accounts.some(account => account.id === previousValue)) {
+                select.value = previousValue;
             }
         }
     } catch (error) {
@@ -13550,10 +13564,10 @@ async function loadAllOrders() {
         const data = await response.json();
         if (data.success) {
             allOrdersData = data.data || [];
-            // 按创建时间倒序排列
+            // 历史同步后优先按平台下单时间排序，回退到入库时间
             allOrdersData.sort((a, b) => {
-                const bTime = parseUtcDateTime(b.created_at)?.getTime() || 0;
-                const aTime = parseUtcDateTime(a.created_at)?.getTime() || 0;
+                const bTime = parseUtcDateTime(getOrderPrimarySortTime(b))?.getTime() || 0;
+                const aTime = parseUtcDateTime(getOrderPrimarySortTime(a))?.getTime() || 0;
                 return bTime - aTime;
             });
 
@@ -13888,6 +13902,487 @@ async function refreshOrders() {
     showToast('订单列表已刷新', 'success');
 }
 
+function getOrderPrimarySortTime(order) {
+    const platformCreatedAt = String(order?.platform_created_at || '').trim();
+    if (platformCreatedAt) {
+        return platformCreatedAt;
+    }
+
+    const createdAt = String(order?.created_at || '').trim();
+    return createdAt || null;
+}
+
+function getRelativeBeijingDateInputValue(offsetDays = 0) {
+    return getBeijingDateKey(new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000));
+}
+
+async function fetchOrderSyncAccounts(forceRefresh = false) {
+    if (!forceRefresh && orderHistorySyncAccounts.length > 0) {
+        return orderHistorySyncAccounts;
+    }
+
+    const response = await fetch(`${apiBase}/cookies/details`, {
+        headers: {
+            'Authorization': `Bearer ${authToken}`
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`获取账号列表失败: HTTP ${response.status}`);
+    }
+
+    const accounts = await response.json();
+    orderHistorySyncAccounts = Array.isArray(accounts) ? accounts : [];
+    return orderHistorySyncAccounts;
+}
+
+function formatOrderAccountLabel(account) {
+    const accountId = String(account?.id || '').trim();
+    const remark = String(account?.remark || '').trim();
+    if (remark) {
+        return `${remark} (${accountId})`;
+    }
+    return accountId || '未命名账号';
+}
+
+function renderOrderAccountOptions(select, accounts, options = {}) {
+    if (!select) return;
+
+    const {
+        includeAllOption = false,
+        allOptionLabel = '所有账号',
+    } = options;
+
+    const previousValue = select.value;
+    select.innerHTML = includeAllOption ? `<option value="">${allOptionLabel}</option>` : '';
+
+    (accounts || []).forEach(account => {
+        const accountId = String(account?.id || '').trim();
+        if (!accountId) return;
+
+        const option = document.createElement('option');
+        option.value = accountId;
+        option.textContent = formatOrderAccountLabel(account);
+        select.appendChild(option);
+    });
+
+    if (previousValue && Array.from(select.options).some(option => option.value === previousValue)) {
+        select.value = previousValue;
+    }
+}
+
+function resetOrderHistorySyncProgress() {
+    renderOrderHistorySyncJob({
+        status: 'idle',
+        message: '选择账号和日期范围后即可开始同步。',
+        request: {},
+        accounts_total: 0,
+        accounts_completed: 0,
+        orders_discovered: 0,
+        orders_processed: 0,
+        orders_saved: 0,
+        orders_skipped: 0,
+        orders_failed: 0,
+        matched_orders: 0,
+        warnings: [],
+    });
+}
+
+function setOrderHistorySyncFormDisabled(disabled) {
+    [
+        'orderHistorySyncCookieId',
+        'orderHistorySyncStartDate',
+        'orderHistorySyncEndDate',
+        'orderHistorySyncMaxOrders',
+        'orderHistorySyncFetchDetails',
+    ].forEach(id => {
+        const element = document.getElementById(id);
+        if (element) {
+            element.disabled = disabled;
+        }
+    });
+
+    const startBtn = document.getElementById('orderHistorySyncStartBtn');
+    const cancelBtn = document.getElementById('orderHistorySyncCancelBtn');
+    if (startBtn) {
+        startBtn.disabled = disabled;
+        startBtn.innerHTML = disabled
+            ? '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>同步中'
+            : '<i class="bi bi-play-circle"></i> 开始同步';
+    }
+    if (cancelBtn) {
+        cancelBtn.style.display = disabled ? '' : 'none';
+        cancelBtn.disabled = false;
+    }
+}
+
+function stopOrderHistorySyncPolling() {
+    if (orderHistorySyncPollingTimer) {
+        clearTimeout(orderHistorySyncPollingTimer);
+        orderHistorySyncPollingTimer = null;
+    }
+}
+
+function scheduleOrderHistorySyncPolling(jobId) {
+    stopOrderHistorySyncPolling();
+    orderHistorySyncPollingTimer = setTimeout(() => {
+        fetchOrderHistorySyncStatus(jobId).catch(error => {
+            console.error('轮询历史订单同步状态失败:', error);
+        });
+    }, 2000);
+}
+
+function getOrderHistorySyncStatusMeta(job) {
+    const status = String(job?.status || '').toLowerCase();
+    const statusMap = {
+        idle: { label: '待命', badgeClass: 'bg-secondary text-white', progressClass: 'bg-secondary', title: '未开始' },
+        pending: { label: '排队中', badgeClass: 'bg-secondary text-white', progressClass: 'bg-secondary', title: '等待执行' },
+        running: { label: '进行中', badgeClass: 'bg-primary text-white', progressClass: 'bg-primary', title: '同步中' },
+        completed: { label: '已完成', badgeClass: 'bg-success text-white', progressClass: 'bg-success', title: '同步完成' },
+        failed: { label: '失败', badgeClass: 'bg-danger text-white', progressClass: 'bg-danger', title: '同步失败' },
+        cancelled: { label: '已取消', badgeClass: 'bg-warning text-dark', progressClass: 'bg-warning', title: '同步已取消' },
+    };
+    return statusMap[status] || statusMap.idle;
+}
+
+function renderOrderHistorySyncJob(job) {
+    const statusMeta = getOrderHistorySyncStatusMeta(job);
+    const request = job?.request || {};
+    const accountsTotal = Number(job?.accounts_total || 0);
+    const accountsCompleted = Number(job?.accounts_completed || 0);
+    const ordersDiscovered = Number(job?.orders_discovered || 0);
+    const matchedOrders = Number(job?.matched_orders || 0);
+    const ordersSaved = Number(job?.orders_saved || 0);
+    const ordersFailed = Number(job?.orders_failed || 0);
+    const ordersProcessed = Number(job?.orders_processed || 0);
+    const ordersSkipped = Number(job?.orders_skipped || 0);
+    const warnings = Array.isArray(job?.warnings) ? job.warnings : [];
+
+    const statusText = document.getElementById('orderHistorySyncStatusText');
+    const messageText = document.getElementById('orderHistorySyncMessageText');
+    const statusBadge = document.getElementById('orderHistorySyncStatusBadge');
+    const progressBar = document.getElementById('orderHistorySyncProgressBar');
+    const accountsStat = document.getElementById('orderHistorySyncAccountsStat');
+    const discoveredStat = document.getElementById('orderHistorySyncDiscoveredStat');
+    const matchedStat = document.getElementById('orderHistorySyncMatchedStat');
+    const savedStat = document.getElementById('orderHistorySyncSavedStat');
+    const metaText = document.getElementById('orderHistorySyncMetaText');
+    const currentText = document.getElementById('orderHistorySyncCurrentText');
+    const warningsWrap = document.getElementById('orderHistorySyncWarningsWrap');
+    const warningsContainer = document.getElementById('orderHistorySyncWarnings');
+    const cookieSelect = document.getElementById('orderHistorySyncCookieId');
+    const startDateInput = document.getElementById('orderHistorySyncStartDate');
+    const endDateInput = document.getElementById('orderHistorySyncEndDate');
+    const maxOrdersInput = document.getElementById('orderHistorySyncMaxOrders');
+    const fetchDetailsInput = document.getElementById('orderHistorySyncFetchDetails');
+
+    if (cookieSelect && Object.prototype.hasOwnProperty.call(request, 'cookie_id')) {
+        cookieSelect.value = request.cookie_id || '';
+    }
+    if (startDateInput && request.start_date) {
+        startDateInput.value = request.start_date;
+    }
+    if (endDateInput && request.end_date) {
+        endDateInput.value = request.end_date;
+    }
+    if (maxOrdersInput && request.max_orders) {
+        maxOrdersInput.value = String(request.max_orders);
+    }
+    if (fetchDetailsInput && Object.prototype.hasOwnProperty.call(request, 'fetch_details')) {
+        fetchDetailsInput.checked = Boolean(request.fetch_details);
+    }
+
+    if (statusText) {
+        statusText.textContent = statusMeta.title;
+    }
+    if (messageText) {
+        messageText.textContent = job?.message || '选择账号和日期范围后即可开始同步。';
+    }
+    if (statusBadge) {
+        statusBadge.className = `badge ${statusMeta.badgeClass}`;
+        statusBadge.textContent = statusMeta.label;
+    }
+
+    let progressPercent = 0;
+    const status = String(job?.status || '').toLowerCase();
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        progressPercent = 100;
+    } else if (accountsTotal > 0) {
+        const accountProgress = accountsCompleted / accountsTotal;
+        const orderProgress = ordersDiscovered > 0 ? (ordersProcessed / ordersDiscovered) : 0;
+        progressPercent = Math.max(accountProgress, orderProgress) * 100;
+    } else if (status === 'pending') {
+        progressPercent = 8;
+    }
+
+    if (progressBar) {
+        progressBar.className = `progress-bar ${statusMeta.progressClass}`;
+        progressBar.style.width = `${Math.max(0, Math.min(100, progressPercent))}%`;
+    }
+
+    if (accountsStat) {
+        accountsStat.textContent = `${accountsCompleted} / ${accountsTotal}`;
+    }
+    if (discoveredStat) {
+        discoveredStat.textContent = String(ordersDiscovered);
+    }
+    if (matchedStat) {
+        matchedStat.textContent = String(matchedOrders);
+    }
+    if (savedStat) {
+        savedStat.textContent = `${ordersSaved} / ${ordersFailed}`;
+    }
+
+    const requestParts = [
+        request.cookie_id ? `账号 ${request.cookie_id}` : '全部账号',
+        request.max_orders ? `最多 ${request.max_orders} 单` : '',
+        request.fetch_details === false ? '仅基础信息' : '含订单详情',
+        request.start_date && request.end_date ? `时间范围 ${request.start_date} 至 ${request.end_date}` : '',
+    ].filter(Boolean);
+    const metaParts = [
+        requestParts.join(' · '),
+        job?.started_at ? `开始于 ${job.started_at}` : '',
+        job?.finished_at ? `结束于 ${job.finished_at}` : '',
+    ].filter(Boolean);
+    if (metaText) {
+        metaText.textContent = metaParts.join(' · ') || '尚未开始任务';
+    }
+
+    const currentParts = [];
+    if (job?.current_account) {
+        currentParts.push(`当前账号: ${job.current_account}`);
+    }
+    if (job?.current_order_id) {
+        currentParts.push(`当前订单: ${job.current_order_id}`);
+    }
+    if (ordersProcessed > 0 || ordersSkipped > 0) {
+        currentParts.push(`已处理 ${ordersProcessed} 单，跳过 ${ordersSkipped} 单`);
+    }
+    if (currentText) {
+        currentText.textContent = currentParts.join(' · ');
+    }
+
+    if (warningsWrap && warningsContainer) {
+        if (warnings.length > 0) {
+            warningsWrap.style.display = '';
+            warningsContainer.innerHTML = warnings.map(message => `
+                <div class="border rounded-3 bg-white px-3 py-2 text-muted small">
+                    ${escapeHtml(message)}
+                </div>
+            `).join('');
+        } else {
+            warningsWrap.style.display = 'none';
+            warningsContainer.innerHTML = '';
+        }
+    }
+
+    setOrderHistorySyncFormDisabled(status === 'pending' || status === 'running');
+}
+
+async function openOrderHistorySyncModal() {
+    try {
+        const modalElement = document.getElementById('orderHistorySyncModal');
+        if (!modalElement) return;
+
+        orderHistorySyncModalInstance = bootstrap.Modal.getOrCreateInstance(modalElement);
+
+        const accounts = await fetchOrderSyncAccounts(true);
+        const select = document.getElementById('orderHistorySyncCookieId');
+        renderOrderAccountOptions(select, accounts, { includeAllOption: true });
+
+        const pageFilterValue = document.getElementById('orderCookieFilter')?.value || '';
+        const startDateInput = document.getElementById('orderHistorySyncStartDate');
+        const endDateInput = document.getElementById('orderHistorySyncEndDate');
+        const maxOrdersInput = document.getElementById('orderHistorySyncMaxOrders');
+        const fetchDetailsInput = document.getElementById('orderHistorySyncFetchDetails');
+
+        if (startDateInput && !startDateInput.value) {
+            startDateInput.value = getRelativeBeijingDateInputValue(-30);
+        }
+        if (endDateInput && !endDateInput.value) {
+            endDateInput.value = getRelativeBeijingDateInputValue(0);
+        }
+        if (maxOrdersInput && !maxOrdersInput.value) {
+            maxOrdersInput.value = '120';
+        }
+        if (fetchDetailsInput && !activeOrderHistorySyncJobId) {
+            fetchDetailsInput.checked = true;
+        }
+
+        if (select && !activeOrderHistorySyncJobId) {
+            select.value = pageFilterValue || '';
+        }
+
+        if (activeOrderHistorySyncJobId) {
+            try {
+                await fetchOrderHistorySyncStatus(activeOrderHistorySyncJobId, { silentToast: true });
+            } catch (error) {
+                if (activeOrderHistorySyncJobId) {
+                    throw error;
+                }
+            }
+        }
+
+        if (!activeOrderHistorySyncJobId) {
+            resetOrderHistorySyncProgress();
+        }
+
+        orderHistorySyncModalInstance.show();
+    } catch (error) {
+        console.error('打开历史订单同步弹窗失败:', error);
+        showToast('加载历史同步配置失败', 'danger');
+    }
+}
+
+async function startOrderHistorySync() {
+    try {
+        const cookieId = document.getElementById('orderHistorySyncCookieId')?.value || '';
+        const startDate = document.getElementById('orderHistorySyncStartDate')?.value || '';
+        const endDate = document.getElementById('orderHistorySyncEndDate')?.value || '';
+        const maxOrders = parseInt(document.getElementById('orderHistorySyncMaxOrders')?.value || '120', 10);
+        const fetchDetails = Boolean(document.getElementById('orderHistorySyncFetchDetails')?.checked);
+
+        if (!startDate || !endDate) {
+            showToast('请选择开始日期和结束日期', 'warning');
+            return;
+        }
+        if (startDate > endDate) {
+            showToast('开始日期不能晚于结束日期', 'warning');
+            return;
+        }
+        if (!Number.isFinite(maxOrders) || maxOrders < 1 || maxOrders > 500) {
+            showToast('最多抓取单数需在 1 到 500 之间', 'warning');
+            return;
+        }
+
+        const startBtn = document.getElementById('orderHistorySyncStartBtn');
+        if (startBtn) {
+            startBtn.disabled = true;
+            startBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>创建任务中';
+        }
+
+        const response = await fetch(`${apiBase}/api/orders/history-sync`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                cookie_id: cookieId || null,
+                start_date: startDate,
+                end_date: endDate,
+                max_orders: maxOrders,
+                fetch_details: fetchDetails,
+            })
+        });
+
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.success || !result.data) {
+            throw new Error(result.detail || result.message || '创建历史订单同步任务失败');
+        }
+
+        activeOrderHistorySyncJobId = result.data.job_id;
+        orderHistorySyncNotifiedJobId = '';
+        renderOrderHistorySyncJob(result.data);
+        scheduleOrderHistorySyncPolling(activeOrderHistorySyncJobId);
+        showToast('历史订单同步已开始', 'success');
+    } catch (error) {
+        console.error('创建历史订单同步任务失败:', error);
+        showToast(error.message || '创建历史订单同步任务失败', 'danger');
+        setOrderHistorySyncFormDisabled(false);
+    } finally {
+        const startBtn = document.getElementById('orderHistorySyncStartBtn');
+        if (startBtn && !startBtn.disabled) {
+            startBtn.innerHTML = '<i class="bi bi-play-circle"></i> 开始同步';
+        }
+    }
+}
+
+async function fetchOrderHistorySyncStatus(jobId, options = {}) {
+    if (!jobId) return null;
+
+    const { silentToast = false } = options;
+    const response = await fetch(`${apiBase}/api/orders/history-sync/${jobId}`, {
+        headers: {
+            'Authorization': `Bearer ${authToken}`
+        }
+    });
+
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success || !result.data) {
+        if (response.status === 404) {
+            activeOrderHistorySyncJobId = '';
+            stopOrderHistorySyncPolling();
+            resetOrderHistorySyncProgress();
+        }
+        throw new Error(result.detail || result.message || '获取历史订单同步状态失败');
+    }
+
+    const job = result.data;
+    activeOrderHistorySyncJobId = job.job_id || activeOrderHistorySyncJobId;
+    renderOrderHistorySyncJob(job);
+
+    const status = String(job?.status || '').toLowerCase();
+    if (status === 'pending' || status === 'running') {
+        scheduleOrderHistorySyncPolling(job.job_id);
+    } else {
+        stopOrderHistorySyncPolling();
+
+        const startBtn = document.getElementById('orderHistorySyncStartBtn');
+        if (startBtn) {
+            startBtn.innerHTML = '<i class="bi bi-play-circle"></i> 开始同步';
+        }
+
+        if (!silentToast && orderHistorySyncNotifiedJobId !== job.job_id) {
+            orderHistorySyncNotifiedJobId = job.job_id;
+            if (status === 'completed') {
+                showToast(job.message || '历史订单同步完成', 'success');
+            } else if (status === 'failed') {
+                showToast(job.error || job.message || '历史订单同步失败', 'danger');
+            } else if (status === 'cancelled') {
+                showToast(job.message || '历史订单同步已取消', 'warning');
+            }
+            await refreshOrdersData();
+        }
+    }
+
+    return job;
+}
+
+async function cancelOrderHistorySync() {
+    if (!activeOrderHistorySyncJobId) {
+        showToast('当前没有可取消的历史同步任务', 'warning');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${apiBase}/api/orders/history-sync/${activeOrderHistorySyncJobId}/cancel`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            }
+        });
+
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.success || !result.data) {
+            throw new Error(result.detail || result.message || '取消历史订单同步失败');
+        }
+
+        stopOrderHistorySyncPolling();
+        renderOrderHistorySyncJob(result.data);
+        orderHistorySyncNotifiedJobId = result.data.job_id || orderHistorySyncNotifiedJobId;
+        const startBtn = document.getElementById('orderHistorySyncStartBtn');
+        if (startBtn) {
+            startBtn.innerHTML = '<i class="bi bi-play-circle"></i> 开始同步';
+        }
+        showToast(result.data.message || '历史订单同步已取消', 'warning');
+        await refreshOrdersData();
+    } catch (error) {
+        console.error('取消历史订单同步失败:', error);
+        showToast(error.message || '取消历史订单同步失败', 'danger');
+    }
+}
+
 // 清空订单筛选条件
 function clearOrderFilters() {
     const searchInput = document.getElementById('orderSearchInput');
@@ -13923,8 +14418,11 @@ async function showOrderDetail(orderId) {
         const safeSpecValue2 = escapeHtml(order.spec_value_2 || '无');
         const safeQuantity = escapeHtml(order.quantity || '1');
         const safeAmount = escapeHtml(formatOrderAmountDisplay(order.amount));
-        const safeCreatedAt = escapeHtml(formatDateTime(order.created_at));
-        const safeUpdatedAt = escapeHtml(formatDateTime(order.updated_at));
+        const safePlatformCreatedAt = escapeHtml(formatBeijingDateTimeWithSeconds(order.platform_created_at));
+        const safePlatformPaidAt = escapeHtml(formatBeijingDateTimeWithSeconds(order.platform_paid_at));
+        const safePlatformCompletedAt = escapeHtml(formatBeijingDateTimeWithSeconds(order.platform_completed_at));
+        const safeCreatedAt = escapeHtml(formatBeijingDateTimeWithSeconds(order.created_at));
+        const safeUpdatedAt = escapeHtml(formatBeijingDateTimeWithSeconds(order.updated_at));
         const safeStatusText = escapeHtml(getOrderStatusText(order.order_status));
 
         const modalContent = `
@@ -13967,7 +14465,10 @@ async function showOrderDetail(orderId) {
                                 <div class="col-12">
                                     <h6>时间信息</h6>
                                     <table class="table table-sm">
-                                        <tr><td>创建时间</td><td>${safeCreatedAt}</td></tr>
+                                        <tr><td>平台下单时间</td><td>${safePlatformCreatedAt}</td></tr>
+                                        <tr><td>平台付款时间</td><td>${safePlatformPaidAt}</td></tr>
+                                        <tr><td>平台完成时间</td><td>${safePlatformCompletedAt}</td></tr>
+                                        <tr><td>入库时间</td><td>${safeCreatedAt}</td></tr>
                                         <tr><td>更新时间</td><td>${safeUpdatedAt}</td></tr>
                                     </table>
                                 </div>
@@ -14319,6 +14820,13 @@ document.addEventListener('DOMContentLoaded', function() {
     // 延迟初始化，确保DOM完全加载
     setTimeout(() => {
         initOrdersSearch();
+
+        const orderHistorySyncModal = document.getElementById('orderHistorySyncModal');
+        if (orderHistorySyncModal) {
+            orderHistorySyncModal.addEventListener('hidden.bs.modal', () => {
+                stopOrderHistorySyncPolling();
+            });
+        }
 
         // 绑定复选框变化事件
         document.addEventListener('change', function(e) {
