@@ -14,6 +14,11 @@ let dashboardData = {
 let pendingAccountManagementFocusId = '';
 let aboutDiagnosticsAccounts = [];
 let aboutDiagnosticsInitialized = false;
+const DASHBOARD_ANNOUNCEMENT_DISMISS_PREFIX = 'dashboard_announcement_dismissed_';
+let dashboardAnnouncementState = {
+    current: null,
+    history: []
+};
 
 // 账号关键词缓存
 let accountKeywordCache = {};
@@ -333,6 +338,266 @@ async function enrichDashboardAccounts(accounts) {
     }));
 }
 
+function getDashboardAnnouncementDismissKey(id) {
+    return `${DASHBOARD_ANNOUNCEMENT_DISMISS_PREFIX}${String(id || '').trim()}`;
+}
+
+function normalizeDashboardAnnouncementState(payload) {
+    return {
+        current: payload?.current || null,
+        history: Array.isArray(payload?.history) ? payload.history : []
+    };
+}
+
+function isDashboardAnnouncementDismissed(announcement) {
+    const announcementId = String(announcement?.id || '').trim();
+    if (!announcementId) {
+        return false;
+    }
+    return localStorage.getItem(getDashboardAnnouncementDismissKey(announcementId)) === 'true';
+}
+
+function dismissDashboardAnnouncement(announcement) {
+    const announcementId = String(announcement?.id || '').trim();
+    if (announcementId) {
+        localStorage.setItem(getDashboardAnnouncementDismissKey(announcementId), 'true');
+    }
+    renderDashboardAnnouncement();
+}
+
+function handleDashboardAnnouncementAction(announcement) {
+    const actionType = String(announcement?.action_type || '').trim().toLowerCase();
+    if (!actionType) {
+        return;
+    }
+
+    if (actionType === 'changelog') {
+        showChangelogModal();
+        return;
+    }
+
+    if (actionType === 'update') {
+        performHotUpdate();
+        return;
+    }
+
+    if (actionType === 'url') {
+        const targetUrl = String(announcement?.action_url || '').trim();
+        if (targetUrl) {
+            window.open(targetUrl, '_blank', 'noopener,noreferrer');
+        }
+    }
+}
+
+function getDashboardAnnouncementLevelText(level) {
+    const normalizedLevel = String(level || '').trim().toLowerCase();
+    if (normalizedLevel === 'success') return '成功';
+    if (normalizedLevel === 'warning') return '提醒';
+    if (normalizedLevel === 'danger') return '重要';
+    return '公告';
+}
+
+function getDashboardAnnouncementStatusText(status) {
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    if (normalizedStatus === 'active') return '当前生效';
+    if (normalizedStatus === 'scheduled') return '尚未生效';
+    if (normalizedStatus === 'expired') return '已结束';
+    if (normalizedStatus === 'disabled') return '未启用';
+    return '历史记录';
+}
+
+function getDashboardAnnouncementDisplayTime(announcement) {
+    const timeValue = String(
+        announcement?.published_at
+        || announcement?.start_at
+        || announcement?.end_at
+        || ''
+    ).trim();
+    if (!timeValue) {
+        return '未设置时间';
+    }
+    return formatDateTime(timeValue);
+}
+
+function showDashboardAnnouncementHistoryModal() {
+    const history = Array.isArray(dashboardAnnouncementState.history) ? dashboardAnnouncementState.history : [];
+    if (!history.length) {
+        showToast('暂无公告记录', 'info');
+        return;
+    }
+
+    const modalId = 'dashboardAnnouncementHistoryModal';
+    const existingModal = document.getElementById(modalId);
+    if (existingModal) {
+        existingModal.remove();
+    }
+
+    const historyHtml = history.map((announcement, index) => {
+        const level = ['info', 'success', 'warning', 'danger'].includes(String(announcement?.level || '').trim().toLowerCase())
+            ? String(announcement.level || '').trim().toLowerCase()
+            : 'info';
+        const status = String(announcement?.status || '').trim().toLowerCase() || 'disabled';
+        const title = String(announcement?.title || '').trim() || '未命名公告';
+        const message = String(announcement?.message || '').trim() || '暂无内容';
+        const actionText = String(announcement?.action_type ? (announcement?.action_text || '') : '').trim();
+        const timeText = getDashboardAnnouncementDisplayTime(announcement);
+        const currentBadge = announcement?.is_current
+            ? '<span class="dashboard-announcement-history-badge is-current">当前</span>'
+            : '';
+
+        return `
+            <article class="dashboard-announcement-history-item ${announcement?.is_current ? 'is-current' : ''}">
+                <div class="dashboard-announcement-history-head">
+                    <div class="dashboard-announcement-history-meta">
+                        <div class="dashboard-announcement-history-title-row">
+                            <h6 class="dashboard-announcement-history-title mb-0">${escapeHtml(title)}</h6>
+                            ${currentBadge}
+                            <span class="dashboard-announcement-history-badge is-${level}">${escapeHtml(getDashboardAnnouncementLevelText(level))}</span>
+                            <span class="dashboard-announcement-history-badge is-status">${escapeHtml(getDashboardAnnouncementStatusText(status))}</span>
+                        </div>
+                        <div class="dashboard-announcement-history-time">
+                            <i class="bi bi-clock-history"></i>
+                            <span>${escapeHtml(timeText)}</span>
+                        </div>
+                    </div>
+                    ${actionText ? `
+                        <button
+                            type="button"
+                            class="btn btn-sm dashboard-announcement-history-action"
+                            data-announcement-history-action-index="${index}"
+                        >
+                            ${escapeHtml(actionText)}
+                        </button>
+                    ` : ''}
+                </div>
+                <div class="dashboard-announcement-history-message">${escapeHtml(message)}</div>
+            </article>
+        `;
+    }).join('');
+
+    document.body.insertAdjacentHTML('beforeend', `
+        <div class="modal fade" id="${modalId}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+                <div class="modal-content dashboard-announcement-history-modal">
+                    <div class="modal-header dashboard-announcement-history-modal-header">
+                        <div>
+                            <h5 class="modal-title mb-1">
+                                <i class="bi bi-megaphone-fill me-2"></i>公告记录
+                            </h5>
+                            <div class="dashboard-announcement-history-modal-subtitle">按发布时间倒序展示近期公告内容</div>
+                        </div>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+                    </div>
+                    <div class="modal-body dashboard-announcement-history-modal-body">
+                        <div class="dashboard-announcement-history-list">
+                            ${historyHtml}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    const modalElement = document.getElementById(modalId);
+    if (!modalElement) {
+        return;
+    }
+
+    modalElement.querySelectorAll('[data-announcement-history-action-index]').forEach(button => {
+        button.addEventListener('click', () => {
+            const index = Number(button.getAttribute('data-announcement-history-action-index'));
+            const announcement = Number.isFinite(index) ? history[index] : null;
+            if (!announcement) {
+                return;
+            }
+            const modalInstance = bootstrap.Modal.getInstance(modalElement);
+            if (modalInstance) {
+                modalInstance.hide();
+            }
+            setTimeout(() => {
+                handleDashboardAnnouncementAction(announcement);
+            }, 120);
+        });
+    });
+
+    modalElement.addEventListener('hidden.bs.modal', () => {
+        modalElement.remove();
+    }, { once: true });
+
+    const modal = new bootstrap.Modal(modalElement);
+    modal.show();
+}
+
+function renderDashboardAnnouncement() {
+    const slot = document.getElementById('dashboardAnnouncementSlot');
+    if (!slot) return;
+
+    const currentAnnouncement = dashboardAnnouncementState.current;
+    if (!currentAnnouncement || isDashboardAnnouncementDismissed(currentAnnouncement)) {
+        slot.style.display = 'none';
+        slot.innerHTML = '';
+        return;
+    }
+
+    const level = ['info', 'success', 'warning', 'danger'].includes(String(currentAnnouncement.level || '').trim().toLowerCase())
+        ? String(currentAnnouncement.level || '').trim().toLowerCase()
+        : 'info';
+    const title = String(currentAnnouncement.title || '').trim();
+    const message = String(currentAnnouncement.message || '').trim();
+    const actionText = String(currentAnnouncement.action_type ? (currentAnnouncement.action_text || '') : '').trim();
+    const dismissible = currentAnnouncement.dismissible !== false;
+
+    slot.style.display = '';
+    slot.innerHTML = `
+        <div class="dashboard-announcement-card is-${level}" role="status" aria-live="polite">
+            <button
+                type="button"
+                class="dashboard-announcement-main"
+                id="dashboardAnnouncementOpenBtn"
+                title="点击查看公告记录"
+                aria-label="查看公告记录"
+            >
+                <span class="dashboard-announcement-icon">
+                    <i class="bi bi-megaphone-fill"></i>
+                </span>
+                <span class="dashboard-announcement-body">
+                    ${title ? `<span class="dashboard-announcement-title">${escapeHtml(title)}</span>` : ''}
+                    ${message ? `<span class="dashboard-announcement-message">${escapeHtml(message)}</span>` : ''}
+                </span>
+            </button>
+            <div class="dashboard-announcement-actions">
+                ${actionText ? `<button type="button" class="btn btn-sm dashboard-announcement-action" id="dashboardAnnouncementActionBtn">${escapeHtml(actionText)}</button>` : ''}
+                ${dismissible ? `
+                    <button type="button" class="btn btn-sm dashboard-announcement-close" id="dashboardAnnouncementCloseBtn" aria-label="关闭公告">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                ` : ''}
+            </div>
+        </div>
+    `;
+
+    const openButton = document.getElementById('dashboardAnnouncementOpenBtn');
+    if (openButton) {
+        openButton.onclick = () => showDashboardAnnouncementHistoryModal();
+    }
+
+    const actionButton = document.getElementById('dashboardAnnouncementActionBtn');
+    if (actionButton) {
+        actionButton.onclick = () => handleDashboardAnnouncementAction(currentAnnouncement);
+    }
+
+    const closeButton = document.getElementById('dashboardAnnouncementCloseBtn');
+    if (closeButton) {
+        closeButton.onclick = () => dismissDashboardAnnouncement(currentAnnouncement);
+    }
+}
+
+async function loadDashboardAnnouncement() {
+    const result = await fetchDashboardResource('/api/announcement', { success: false, current: null, history: [] });
+    dashboardAnnouncementState = normalizeDashboardAnnouncementState(result?.success ? result : null);
+    renderDashboardAnnouncement();
+}
+
 function renderDashboardSummaryCard(label, value, tone = 'primary', details = []) {
     const detailMarkup = Array.isArray(details) && details.length ? `
         <div class="dashboard-account-summary-details">
@@ -581,6 +846,7 @@ function renderDashboardAccountOverview(accounts, totalItems = 0) {
 async function loadDashboard() {
     try {
     toggleLoading(true);
+    loadDashboardAnnouncement();
 
     // 获取账号列表
     const cookiesResponse = await fetch(`${apiBase}/cookies/details`, {

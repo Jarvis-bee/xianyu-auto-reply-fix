@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from typing import List, Tuple, Optional, Dict, Any, Callable, Awaitable
 from pathlib import Path
 from urllib.parse import unquote
+from urllib import request as urllib_request, error as urllib_error
 import hashlib
 import secrets
 import time
@@ -137,6 +138,281 @@ ORDER_SALES_TIME_SQL = "COALESCE(NULLIF(platform_paid_at, ''), NULLIF(platform_c
 ORDER_HISTORY_SYNC_JOB_RETENTION_SECONDS = 3600
 order_history_sync_jobs: Dict[str, Dict[str, Any]] = {}
 order_history_sync_tasks: Dict[str, asyncio.Task] = {}
+ANNOUNCEMENT_CACHE_TTL_SECONDS = 300
+announcement_cache: Dict[str, Any] = {
+    'expires_at': 0.0,
+    'current': None,
+    'history': [],
+    'last_success_current': None,
+    'last_success_history': [],
+    'has_remote_success': False,
+}
+
+
+def _get_announcement_remote_url() -> str:
+    configured_url = str(os.getenv('DASHBOARD_ANNOUNCEMENT_URL') or '').strip()
+    if configured_url:
+        return configured_url
+
+    owner = str(os.getenv('UPDATE_GITHUB_OWNER') or 'GuDong2003').strip() or 'GuDong2003'
+    repo = str(os.getenv('UPDATE_GITHUB_REPO') or 'xianyu-auto-reply-fix').strip() or 'xianyu-auto-reply-fix'
+    branch = str(os.getenv('DASHBOARD_ANNOUNCEMENT_BRANCH') or 'main').strip() or 'main'
+    file_path = str(os.getenv('DASHBOARD_ANNOUNCEMENT_FILE') or 'announcement.json').strip().lstrip('/')
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
+
+
+def _get_announcement_local_path() -> Path:
+    file_path = str(os.getenv('DASHBOARD_ANNOUNCEMENT_FILE') or 'announcement.json').strip().lstrip('/')
+    return Path(__file__).parent / file_path
+
+
+def _parse_announcement_datetime(value: Any) -> Optional[datetime]:
+    raw_value = str(value or '').strip()
+    if not raw_value:
+        return None
+
+    normalized_value = raw_value.replace('Z', '+00:00') if raw_value.endswith('Z') else raw_value
+    try:
+        parsed = datetime.fromisoformat(normalized_value)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=LOCAL_TIMEZONE)
+    return parsed.astimezone(LOCAL_TIMEZONE)
+
+
+def _build_announcement_id(payload: Dict[str, Any]) -> str:
+    raw_id = str(payload.get('id') or '').strip()
+    if raw_id:
+        return raw_id
+
+    stable_source = json.dumps(
+        {
+            'level': str(payload.get('level') or '').strip(),
+            'title': str(payload.get('title') or '').strip(),
+            'message': str(payload.get('message') or '').strip(),
+            'action_text': str(payload.get('action_text') or '').strip(),
+            'action_type': str(payload.get('action_type') or '').strip(),
+            'action_url': str(payload.get('action_url') or '').strip(),
+            'dismissible': payload.get('dismissible', True),
+            'start_at': str(payload.get('start_at') or '').strip(),
+            'end_at': str(payload.get('end_at') or '').strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"announcement-{hashlib.sha1(stable_source.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _coerce_announcement_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    normalized = str(value).strip().lower()
+    if normalized in {'1', 'true', 'yes', 'y', 'on', 'enabled'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'n', 'off', 'disabled', ''}:
+        return False
+    return default
+
+
+def _empty_dashboard_announcement_snapshot() -> Dict[str, Any]:
+    return {
+        'current': None,
+        'history': [],
+    }
+
+
+def _normalize_dashboard_announcement_entry(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    enabled = _coerce_announcement_bool(payload.get('enabled'), default=False)
+    start_at = _parse_announcement_datetime(payload.get('start_at'))
+    end_at = _parse_announcement_datetime(payload.get('end_at'))
+    title = str(payload.get('title') or '').strip()
+    message = str(payload.get('message') or '').strip()
+    if not title and not message:
+        return None
+
+    level = str(payload.get('level') or 'info').strip().lower()
+    if level not in {'info', 'success', 'warning', 'danger'}:
+        level = 'info'
+
+    action_type = str(payload.get('action_type') or '').strip().lower()
+    if action_type not in {'', 'url', 'changelog', 'update'}:
+        action_type = ''
+
+    action_url = str(payload.get('action_url') or '').strip()
+    if action_type == 'url' and not action_url:
+        action_type = ''
+
+    action_text = str(payload.get('action_text') or '').strip()
+    if action_type and not action_text:
+        action_text = '查看详情' if action_type == 'url' else '立即查看'
+    if not action_type:
+        action_text = ''
+
+    published_at = _parse_announcement_datetime(payload.get('published_at'))
+    now = get_local_now()
+    if not enabled:
+        status = 'disabled'
+    elif start_at and now < start_at:
+        status = 'scheduled'
+    elif end_at and now > end_at:
+        status = 'expired'
+    else:
+        status = 'active'
+
+    return {
+        'id': _build_announcement_id(payload),
+        'enabled': enabled,
+        'status': status,
+        'level': level,
+        'title': title,
+        'message': message,
+        'action_text': action_text,
+        'action_type': action_type,
+        'action_url': action_url,
+        'dismissible': _coerce_announcement_bool(payload.get('dismissible'), default=True),
+        'published_at': published_at.isoformat() if published_at else '',
+        'start_at': start_at.isoformat() if start_at else '',
+        'end_at': end_at.isoformat() if end_at else '',
+    }
+
+
+def _normalize_dashboard_announcement_snapshot(payload: Any) -> Optional[Dict[str, Any]]:
+    announcements_payload = payload if isinstance(payload, list) else payload.get('announcements') if isinstance(payload, dict) else None
+    if not isinstance(announcements_payload, list):
+        return None
+
+    history: List[Dict[str, Any]] = []
+    for item in announcements_payload:
+        normalized_item = _normalize_dashboard_announcement_entry(item)
+        if normalized_item:
+            history.append(normalized_item)
+
+    history.sort(
+        key=lambda item: item.get('published_at') or item.get('start_at') or item.get('end_at') or '',
+        reverse=True,
+    )
+
+    current_id = ''
+    for item in history:
+        if item.get('status') == 'active':
+            current_id = str(item.get('id') or '').strip()
+            break
+
+    normalized_history: List[Dict[str, Any]] = []
+    current_announcement: Optional[Dict[str, Any]] = None
+    for item in history:
+        normalized_item = dict(item)
+        normalized_item['is_current'] = bool(current_id and normalized_item.get('id') == current_id)
+        normalized_history.append(normalized_item)
+        if normalized_item['is_current'] and current_announcement is None:
+            current_announcement = dict(normalized_item)
+
+    return {
+        'current': current_announcement,
+        'history': normalized_history,
+    }
+
+
+def _try_load_dashboard_announcement_snapshot_from_remote() -> Tuple[bool, Optional[Dict[str, Any]]]:
+    remote_url = _get_announcement_remote_url()
+    try:
+        request = urllib_request.Request(
+            remote_url,
+            headers={
+                'User-Agent': 'XianyuDashboardAnnouncement/1.0',
+                'Accept': 'application/json',
+            }
+        )
+        with urllib_request.urlopen(request, timeout=8) as response:
+            status_code = getattr(response, 'status', 200)
+            if status_code != 200:
+                logger.warning(f"获取远端公告失败: http_status={status_code}, url={remote_url}")
+                return False, None
+            raw_content = response.read().decode('utf-8')
+    except urllib_error.HTTPError as exc:
+        logger.warning(f"获取远端公告失败: http_status={exc.code}, url={remote_url}")
+        return False, None
+    except Exception as exc:
+        logger.warning(f"获取远端公告异常: url={remote_url}, error={mask_sensitive_text(exc)}")
+        return False, None
+
+    try:
+        payload = json.loads(raw_content)
+    except json.JSONDecodeError as exc:
+        logger.warning(f"解析远端公告失败: url={remote_url}, error={exc}")
+        return False, None
+
+    snapshot = _normalize_dashboard_announcement_snapshot(payload)
+    if snapshot is None:
+        logger.warning(f"远端公告格式无效: url={remote_url}")
+        return False, None
+
+    return True, snapshot
+
+
+def _try_load_dashboard_announcement_snapshot_from_local() -> Optional[Dict[str, Any]]:
+    local_path = _get_announcement_local_path()
+    if not local_path.exists():
+        return None
+
+    try:
+        payload = json.loads(local_path.read_text(encoding='utf-8'))
+    except Exception as exc:
+        logger.warning(f"读取本地公告文件失败: path={local_path}, error={mask_sensitive_text(exc)}")
+        return None
+
+    snapshot = _normalize_dashboard_announcement_snapshot(payload)
+    if snapshot is None:
+        logger.warning(f"本地公告格式无效: path={local_path}")
+        return None
+
+    return snapshot
+
+
+def _get_dashboard_announcement_payload(force_refresh: bool = False) -> Dict[str, Any]:
+    now_ts = time.time()
+    if not force_refresh and announcement_cache.get('expires_at', 0) > now_ts:
+        return {
+            'current': announcement_cache.get('current'),
+            'history': list(announcement_cache.get('history') or []),
+        }
+
+    loaded_remote, remote_snapshot = _try_load_dashboard_announcement_snapshot_from_remote()
+    if loaded_remote and remote_snapshot is not None:
+        announcement_cache.update({
+            'expires_at': now_ts + ANNOUNCEMENT_CACHE_TTL_SECONDS,
+            'current': remote_snapshot.get('current'),
+            'history': list(remote_snapshot.get('history') or []),
+            'last_success_current': remote_snapshot.get('current'),
+            'last_success_history': list(remote_snapshot.get('history') or []),
+            'has_remote_success': True,
+        })
+        return remote_snapshot
+
+    if announcement_cache.get('has_remote_success'):
+        snapshot = {
+            'current': announcement_cache.get('last_success_current'),
+            'history': list(announcement_cache.get('last_success_history') or []),
+        }
+    else:
+        snapshot = _try_load_dashboard_announcement_snapshot_from_local() or _empty_dashboard_announcement_snapshot()
+
+    announcement_cache.update({
+        'expires_at': now_ts + ANNOUNCEMENT_CACHE_TTL_SECONDS,
+        'current': snapshot.get('current'),
+        'history': list(snapshot.get('history') or []),
+    })
+    return snapshot
 
 
 def mask_sensitive_text(text: Any) -> str:
@@ -2485,6 +2761,31 @@ def get_cookies_details(current_user: Dict[str, Any] = Depends(get_current_user)
             'runtime_status': _build_live_runtime_status(cookie_id),
         })
     return result
+
+
+@app.get("/api/announcement")
+def get_dashboard_announcement(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取仪表盘公告，优先读取 GitHub 公告文件，本地文件兜底。"""
+    try:
+        _ = current_user['user_id']
+        snapshot = _get_dashboard_announcement_payload()
+        return {
+            'success': True,
+            'announcement': snapshot.get('current'),
+            'current': snapshot.get('current'),
+            'history': snapshot.get('history') or [],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取仪表盘公告失败: {mask_sensitive_text(e)}")
+        return {
+            'success': False,
+            'announcement': None,
+            'current': None,
+            'history': [],
+            'message': safe_client_error("获取公告失败，请稍后重试"),
+        }
 
 
 @app.post("/cookies")

@@ -207,13 +207,16 @@
     <!-- 仪表盘内容 -->
     <div id="dashboard-section" class="content-section active">
       <div class="content-header">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <h2 class="mb-0">
-              <i class="bi bi-speedometer2 me-2"></i>
-              仪表盘
-            </h2>
-            <p class="text-muted mb-0">系统概览和统计信息</p>
+        <div class="dashboard-header-shell">
+          <div class="dashboard-header-main">
+            <div class="dashboard-header-copy">
+              <h2 class="mb-0">
+                <i class="bi bi-speedometer2 me-2"></i>
+                仪表盘
+              </h2>
+              <p class="text-muted mb-0">系统概览和统计信息</p>
+            </div>
+            <div class="dashboard-announcement-slot" id="dashboardAnnouncementSlot" style="display: none;"></div>
           </div>
           <div class="version-info d-flex gap-2">
             <span class="badge d-inline-flex align-items-center sponsor-pill" onclick="showSection('about')" title="赞助作者">
