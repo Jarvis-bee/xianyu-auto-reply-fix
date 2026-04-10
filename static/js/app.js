@@ -57,6 +57,11 @@ let orderHistorySyncAccounts = [];
 let loadingRequestCount = 0;
 let loadingShowTimer = null;
 const LOADING_SHOW_DELAY = 120;
+let productPublishState = {
+    singleImages: [],
+    batchProducts: [],
+    templates: []
+};
 
 // ================================
 // 通用功能 - 菜单切换和导航
@@ -106,6 +111,9 @@ function showSection(sectionName) {
     case 'items':           // 【商品管理菜单】
         loadItems();
         initItemsSearch(); // 确保搜索功能已初始化
+        break;
+    case 'product-publish': // 【商品发布菜单】
+        loadProductPublishPage();
         break;
     case 'items-reply':           // 【商品回复管理菜单】
         loadItemsReplay();
@@ -8977,6 +8985,7 @@ const DEFAULT_MENU_ITEMS = [
     { id: 'dashboard', name: '仪表盘', icon: 'bi-speedometer2', required: true },
     { id: 'accounts', name: '账号管理', icon: 'bi-person-circle', required: false },
     { id: 'items', name: '商品管理', icon: 'bi-box-seam', required: false },
+    { id: 'product-publish', name: '商品发布', icon: 'bi-cloud-upload', required: false },
     { id: 'orders', name: '订单管理', icon: 'bi-receipt-cutoff', required: false },
     { id: 'auto-reply', name: '自动回复', icon: 'bi-chat-left-text', required: false },
     { id: 'items-reply', name: '指定商品回复', icon: 'bi-chat-left-text', required: false },
@@ -15719,6 +15728,8 @@ const tableDescriptions = {
     'ai_conversations': 'AI对话历史表',
     'ai_item_cache': 'AI商品信息缓存表',
     'item_info': '商品信息表',
+    'product_templates': '商品模板表',
+    'product_publish_history': '商品发布历史表',
     'message_notifications': '消息通知表',
     'cards': '卡券表',
     'delivery_rules': '发货规则表',
@@ -19918,6 +19929,777 @@ function loadOnlineIm() {
     if (iframe && iframe.src === 'about:blank') {
         const realSrc = iframe.dataset.src || 'https://www.goofish.com/im';
         iframe.src = realSrc;
+    }
+}
+
+// ==================== 商品发布管理 ====================
+
+async function loadProductPublishPage() {
+    await loadProductPublishAccounts();
+    await loadProductPublishTemplates();
+    renderProductPublishSingleImages();
+    renderBatchPublishProducts();
+    await loadProductPublishHistory();
+}
+
+async function loadProductPublishAccounts() {
+    try {
+        const accounts = await fetchJSON(`${apiBase}/cookies/details`);
+        const normalizedAccounts = Array.isArray(accounts) ? accounts.slice().sort((a, b) => String(a.id).localeCompare(String(b.id))) : [];
+        updateProductPublishAccountSelect('productPublishCookieId', normalizedAccounts);
+        updateProductPublishAccountSelect('batchProductPublishCookieId', normalizedAccounts);
+    } catch (error) {
+        console.error('加载商品发布账号失败:', error);
+    }
+}
+
+function updateProductPublishAccountSelect(selectId, accounts) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+
+    const previousValue = select.value;
+    const options = ['<option value="">请选择账号</option>'];
+    accounts.forEach(account => {
+        const labelParts = [account.username, account.remark, account.id].filter(Boolean);
+        const label = labelParts[0] || account.id;
+        options.push(`<option value="${escapeHtml(account.id)}">${escapeHtml(label)}</option>`);
+    });
+    select.innerHTML = options.join('');
+
+    if (accounts.some(account => account.id === previousValue)) {
+        select.value = previousValue;
+    }
+}
+
+async function loadProductPublishTemplates() {
+    try {
+        const data = await fetchJSON(`${apiBase}/api/products/templates`);
+        if (!data?.success) {
+            return;
+        }
+
+        productPublishState.templates = Array.isArray(data.templates) ? data.templates : [];
+        renderProductTemplateSelect();
+        renderProductTemplateTable();
+    } catch (error) {
+        console.error('加载商品模板失败:', error);
+    }
+}
+
+function renderProductTemplateSelect() {
+    const select = document.getElementById('productPublishTemplateSelect');
+    if (!select) return;
+
+    const previousValue = select.value;
+    const options = ['<option value="">不使用模板</option>'];
+    productPublishState.templates.forEach(template => {
+        options.push(`<option value="${template.id}">${escapeHtml(template.name)}</option>`);
+    });
+    select.innerHTML = options.join('');
+
+    if (productPublishState.templates.some(template => String(template.id) === previousValue)) {
+        select.value = previousValue;
+    }
+}
+
+function renderProductTemplateTable() {
+    const tbody = document.getElementById('productTemplateTableBody');
+    if (!tbody) return;
+
+    if (!productPublishState.templates.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">暂无模板</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = productPublishState.templates.map(template => {
+        const metaParts = [template.category, template.location].filter(Boolean);
+        const description = template.description_template || '';
+        return `
+            <tr>
+                <td>
+                    <div class="fw-semibold">${escapeHtml(template.name)}</div>
+                    <div class="small text-muted">${escapeHtml(template.updated_at || template.created_at || '')}</div>
+                </td>
+                <td>${escapeHtml(metaParts.join(' / ') || '-')}</td>
+                <td>
+                    <div class="small text-muted text-truncate" style="max-width: 280px;" title="${escapeHtml(description)}">
+                        ${escapeHtml(description || '-')}
+                    </div>
+                </td>
+                <td class="text-end">
+                    <div class="btn-group btn-group-sm">
+                        <button type="button" class="btn btn-outline-secondary" onclick="useProductTemplate(${template.id})">套用</button>
+                        <button type="button" class="btn btn-outline-secondary" onclick="editProductTemplate(${template.id})">编辑</button>
+                        <button type="button" class="btn btn-outline-danger" onclick="deleteProductTemplate(${template.id})">删除</button>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function getSelectedProductTemplate() {
+    const templateId = document.getElementById('productPublishTemplateSelect')?.value;
+    if (!templateId) return null;
+    return productPublishState.templates.find(template => String(template.id) === String(templateId)) || null;
+}
+
+function applyProductTemplateToSingleForm(template) {
+    if (!template) {
+        showToast('请选择有效模板', 'warning');
+        return;
+    }
+
+    const categoryInput = document.getElementById('productPublishCategory');
+    const locationInput = document.getElementById('productPublishLocation');
+    const descriptionInput = document.getElementById('productPublishDescription');
+
+    if (categoryInput) categoryInput.value = template.category || '';
+    if (locationInput) locationInput.value = template.location || '';
+    if (descriptionInput && template.description_template) {
+        descriptionInput.value = template.description_template;
+    }
+
+    showToast(`已套用模板：${template.name}`, 'success');
+}
+
+function applySelectedProductTemplate() {
+    const template = getSelectedProductTemplate();
+    if (!template) {
+        showToast('请先选择模板', 'warning');
+        return;
+    }
+    applyProductTemplateToSingleForm(template);
+}
+
+function useProductTemplate(templateId) {
+    const template = productPublishState.templates.find(item => Number(item.id) === Number(templateId));
+    if (!template) {
+        showToast('模板不存在', 'warning');
+        return;
+    }
+    const select = document.getElementById('productPublishTemplateSelect');
+    if (select) select.value = String(template.id);
+    applyProductTemplateToSingleForm(template);
+}
+
+function editProductTemplate(templateId) {
+    const template = productPublishState.templates.find(item => Number(item.id) === Number(templateId));
+    if (!template) {
+        showToast('模板不存在', 'warning');
+        return;
+    }
+
+    document.getElementById('productTemplateId').value = template.id;
+    document.getElementById('productTemplateName').value = template.name || '';
+    document.getElementById('productTemplateCategory').value = template.category || '';
+    document.getElementById('productTemplateLocation').value = template.location || '';
+    document.getElementById('productTemplateDescription').value = template.description_template || '';
+
+    const submitBtn = document.getElementById('productTemplateSubmitBtn');
+    if (submitBtn) {
+        submitBtn.textContent = '更新模板';
+    }
+}
+
+function resetProductTemplateForm() {
+    const form = document.getElementById('productTemplateForm');
+    form?.reset();
+    const hiddenId = document.getElementById('productTemplateId');
+    if (hiddenId) hiddenId.value = '';
+    const submitBtn = document.getElementById('productTemplateSubmitBtn');
+    if (submitBtn) {
+        submitBtn.textContent = '保存模板';
+    }
+}
+
+async function submitProductTemplateForm(event) {
+    event.preventDefault();
+
+    const templateId = document.getElementById('productTemplateId')?.value || '';
+    const name = document.getElementById('productTemplateName')?.value.trim() || '';
+    const category = document.getElementById('productTemplateCategory')?.value.trim() || '';
+    const location = document.getElementById('productTemplateLocation')?.value.trim() || '';
+    const descriptionTemplate = document.getElementById('productTemplateDescription')?.value.trim() || '';
+
+    if (!name) {
+        showToast('请填写模板名称', 'warning');
+        return;
+    }
+
+    const submitBtn = document.getElementById('productTemplateSubmitBtn');
+    if (submitBtn) submitBtn.disabled = true;
+
+    try {
+        const payload = {
+            name,
+            category: category || null,
+            location: location || null,
+            description_template: descriptionTemplate || null,
+        };
+
+        const url = templateId
+            ? `${apiBase}/api/products/templates/${templateId}`
+            : `${apiBase}/api/products/templates`;
+        const method = templateId ? 'PUT' : 'POST';
+
+        const result = await fetchJSON(url, {
+            method,
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        showToast(result?.message || (templateId ? '模板更新成功' : '模板创建成功'), 'success');
+        resetProductTemplateForm();
+        await loadProductPublishTemplates();
+    } catch (error) {
+        console.error('保存商品模板失败:', error);
+    } finally {
+        if (submitBtn) submitBtn.disabled = false;
+    }
+}
+
+async function deleteProductTemplate(templateId) {
+    if (!confirm('确定删除这个商品模板吗？')) {
+        return;
+    }
+
+    try {
+        const result = await fetchJSON(`${apiBase}/api/products/templates/${templateId}`, {
+            method: 'DELETE'
+        });
+        showToast(result?.message || '模板删除成功', 'success');
+        resetProductTemplateForm();
+        await loadProductPublishTemplates();
+    } catch (error) {
+        console.error('删除商品模板失败:', error);
+    }
+}
+
+async function handleProductPublishImageSelection(event) {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) {
+        return;
+    }
+
+    const input = event.target;
+    input.disabled = true;
+
+    try {
+        for (const file of files) {
+            const formData = new FormData();
+            formData.append('image', file);
+
+            const response = await fetch(`${apiBase}/upload-image`, {
+                method: 'POST',
+                headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
+                body: formData
+            });
+
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || result.message || `上传失败: ${file.name}`);
+            }
+
+            productPublishState.singleImages.push({
+                name: file.name,
+                path: result.image_url,
+                previewUrl: URL.createObjectURL(file)
+            });
+        }
+
+        renderProductPublishSingleImages();
+        showToast(`已加入 ${files.length} 张图片`, 'success');
+    } catch (error) {
+        console.error('上传商品发布图片失败:', error);
+        showToast(error.message || '上传图片失败', 'danger');
+    } finally {
+        input.value = '';
+        input.disabled = false;
+    }
+}
+
+function renderProductPublishSingleImages() {
+    const container = document.getElementById('productPublishImagesList');
+    if (!container) return;
+
+    if (!productPublishState.singleImages.length) {
+        container.innerHTML = `
+            <div class="col-12">
+                <div class="border rounded p-3 text-muted text-center">尚未添加图片</div>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = productPublishState.singleImages.map((image, index) => `
+        <div class="col-md-6 col-lg-4">
+            <div class="border rounded p-2 h-100">
+                <div class="ratio ratio-1x1 bg-light rounded overflow-hidden mb-2">
+                    <img src="${image.previewUrl}" alt="${escapeHtml(image.name)}" style="object-fit: cover;">
+                </div>
+                <div class="small text-truncate mb-2" title="${escapeHtml(image.name)}">${escapeHtml(image.name)}</div>
+                <div class="small text-muted text-truncate mb-2" title="${escapeHtml(image.path)}">${escapeHtml(image.path)}</div>
+                <button type="button" class="btn btn-sm btn-outline-danger w-100" onclick="removeProductPublishImage(${index})">
+                    <i class="bi bi-trash me-1"></i>移除
+                </button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function removeProductPublishImage(index) {
+    const removed = productPublishState.singleImages.splice(index, 1);
+    if (removed[0]?.previewUrl) {
+        URL.revokeObjectURL(removed[0].previewUrl);
+    }
+    renderProductPublishSingleImages();
+}
+
+function resetProductPublishSingleForm() {
+    const form = document.getElementById('productPublishSingleForm');
+    const keepCookieId = document.getElementById('productPublishCookieId')?.value || '';
+    const keepTemplateId = document.getElementById('productPublishTemplateSelect')?.value || '';
+
+    form?.reset();
+    if (keepCookieId) {
+        const select = document.getElementById('productPublishCookieId');
+        if (select) select.value = keepCookieId;
+    }
+    if (keepTemplateId) {
+        const templateSelect = document.getElementById('productPublishTemplateSelect');
+        if (templateSelect) templateSelect.value = keepTemplateId;
+    }
+
+    productPublishState.singleImages.forEach(image => {
+        if (image.previewUrl) {
+            URL.revokeObjectURL(image.previewUrl);
+        }
+    });
+    productPublishState.singleImages = [];
+    renderProductPublishSingleImages();
+
+    const result = document.getElementById('productPublishSingleResult');
+    if (result) {
+        result.className = 'alert mt-3 d-none';
+        result.innerHTML = '';
+    }
+}
+
+function renderProductPublishSingleResult(success, message, payload = {}) {
+    const result = document.getElementById('productPublishSingleResult');
+    if (!result) return;
+
+    let extraHtml = '';
+    if (payload.product_url) {
+        extraHtml += `<div class="mt-2"><a href="${payload.product_url}" target="_blank" rel="noopener noreferrer">打开已发布商品</a></div>`;
+    } else if (payload.existing_product?.product_url || payload.existing_product?.existing_product_url) {
+        const existingUrl = payload.existing_product.product_url || payload.existing_product.existing_product_url;
+        extraHtml += `<div class="mt-2"><a href="${existingUrl}" target="_blank" rel="noopener noreferrer">查看已存在商品</a></div>`;
+    }
+
+    result.className = `alert mt-3 ${success ? 'alert-success' : 'alert-warning'}`;
+    result.innerHTML = `<div>${escapeHtml(message || (success ? '发布成功' : '发布失败'))}</div>${extraHtml}`;
+}
+
+async function submitProductPublishForm(event) {
+    event.preventDefault();
+
+    const cookieId = document.getElementById('productPublishCookieId')?.value || '';
+    const description = document.getElementById('productPublishDescription')?.value.trim() || '';
+    const price = parseFloat(document.getElementById('productPublishPrice')?.value || '');
+
+    if (!cookieId) {
+        showToast('请选择发布账号', 'warning');
+        return;
+    }
+    if (!description) {
+        showToast('请填写商品描述', 'warning');
+        return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+        showToast('请填写有效的售价', 'warning');
+        return;
+    }
+    if (!productPublishState.singleImages.length) {
+        showToast('请至少上传一张商品图片', 'warning');
+        return;
+    }
+
+    const submitBtn = document.getElementById('productPublishSubmitBtn');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>发布中...';
+    }
+
+    try {
+        const payload = {
+            cookie_id: cookieId,
+            title: document.getElementById('productPublishTitle')?.value.trim() || undefined,
+            description,
+            price,
+            images: productPublishState.singleImages.map(image => image.path),
+            category: document.getElementById('productPublishCategory')?.value.trim() || undefined,
+            location: document.getElementById('productPublishLocation')?.value.trim() || undefined,
+            original_price: document.getElementById('productPublishOriginalPrice')?.value
+                ? parseFloat(document.getElementById('productPublishOriginalPrice').value)
+                : undefined
+        };
+
+        const result = await fetchJSON(`${apiBase}/api/products/publish`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        renderProductPublishSingleResult(Boolean(result?.success), result?.message || '发布完成', result || {});
+        if (result?.success) {
+            showToast('商品发布成功', 'success');
+            const keepCookieId = cookieId;
+            const keepTemplateId = document.getElementById('productPublishTemplateSelect')?.value || '';
+            resetProductPublishSingleForm();
+            const select = document.getElementById('productPublishCookieId');
+            if (select) select.value = keepCookieId;
+            const templateSelect = document.getElementById('productPublishTemplateSelect');
+            if (templateSelect) templateSelect.value = keepTemplateId;
+            renderProductPublishSingleResult(true, result?.message || '商品发布成功', result || {});
+        } else {
+            showToast(result?.message || '商品发布失败', 'warning');
+        }
+
+        await loadProductPublishHistory();
+    } catch (error) {
+        console.error('单个商品发布失败:', error);
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="bi bi-cloud-upload me-1"></i>开始发布';
+        }
+    }
+}
+
+function downloadProductPublishTemplate() {
+    const csvContent = [
+        'title,description,price,images,category,location,original_price',
+        '"iPhone 15 Pro 256G","国行 256G，边框轻微使用痕迹，支持验货。",4999,"/absolute/path/iphone1.jpg|/absolute/path/iphone2.jpg","数码产品/手机/苹果","浙江省/杭州市",6999',
+        '"MacBook Air M2 16+512","M2 16+512，电池健康优秀，配件齐全。",5299,"static/uploads/images/example_a.jpg|static/uploads/images/example_b.jpg","数码产品/笔记本/苹果","上海市/浦东新区",7999'
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'product_publish_template.csv';
+    link.click();
+    URL.revokeObjectURL(link.href);
+}
+
+function clearBatchPublishProducts() {
+    productPublishState.batchProducts = [];
+    const input = document.getElementById('batchProductPublishCsv');
+    if (input) input.value = '';
+    const result = document.getElementById('batchProductPublishResult');
+    if (result) {
+        result.className = 'alert mt-3 d-none';
+        result.innerHTML = '';
+    }
+    renderBatchPublishProducts();
+}
+
+function parseProductPublishCsvRows(text) {
+    const normalizedText = String(text || '')
+        .replace(/^\uFEFF/, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n');
+    const rows = [];
+    let currentRow = [];
+    let currentValue = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < normalizedText.length; i += 1) {
+        const char = normalizedText[i];
+        const nextChar = normalizedText[i + 1];
+
+        if (char === '"') {
+            if (inQuotes && nextChar === '"') {
+                currentValue += '"';
+                i += 1;
+            } else {
+                inQuotes = !inQuotes;
+            }
+            continue;
+        }
+
+        if (char === ',' && !inQuotes) {
+            currentRow.push(currentValue.trim());
+            currentValue = '';
+            continue;
+        }
+
+        if (char === '\n' && !inQuotes) {
+            currentRow.push(currentValue.trim());
+            if (currentRow.some(value => value !== '')) {
+                rows.push(currentRow);
+            }
+            currentRow = [];
+            currentValue = '';
+            continue;
+        }
+
+        currentValue += char;
+    }
+
+    if (inQuotes) {
+        throw new Error('CSV 格式错误：存在未闭合的引号');
+    }
+
+    currentRow.push(currentValue.trim());
+    if (currentRow.some(value => value !== '')) {
+        rows.push(currentRow);
+    }
+
+    return rows;
+}
+
+function parseProductPublishPrice(value, rowIndex, fieldName = 'price', required = false) {
+    const rawValue = String(value || '').trim();
+    if (!rawValue) {
+        if (required) {
+            throw new Error(`第 ${rowIndex} 行的 ${fieldName} 不能为空`);
+        }
+        return undefined;
+    }
+
+    const normalizedValue = rawValue.replace(/,/g, '');
+    if (!/^-?\d+(\.\d+)?$/.test(normalizedValue)) {
+        throw new Error(`第 ${rowIndex} 行的 ${fieldName} 不是有效数字: ${rawValue}`);
+    }
+
+    const parsedValue = Number(normalizedValue);
+    if (!Number.isFinite(parsedValue)) {
+        throw new Error(`第 ${rowIndex} 行的 ${fieldName} 不是有效数字: ${rawValue}`);
+    }
+
+    return parsedValue;
+}
+
+function parseProductPublishCsv(text) {
+    const rows = parseProductPublishCsvRows(text);
+
+    if (rows.length < 2) {
+        throw new Error('CSV 至少需要表头和一行数据');
+    }
+
+    const headers = rows[0].map(header => header.toLowerCase());
+    const requiredHeaders = ['description', 'price', 'images'];
+    for (const requiredHeader of requiredHeaders) {
+        if (!headers.includes(requiredHeader)) {
+            throw new Error(`CSV 缺少必填列: ${requiredHeader}`);
+        }
+    }
+
+    return rows.slice(1).map((columns, index) => {
+        const rowIndex = index + 2;
+        const row = {};
+        headers.forEach((header, headerIndex) => {
+            row[header] = columns[headerIndex] || '';
+        });
+
+        const price = parseProductPublishPrice(row.price, rowIndex, 'price', true);
+        const originalPrice = parseProductPublishPrice(row.original_price, rowIndex, 'original_price', false);
+        if (price < 0) {
+            throw new Error(`第 ${rowIndex} 行的 price 不能小于 0`);
+        }
+        if (originalPrice !== undefined && originalPrice < 0) {
+            throw new Error(`第 ${rowIndex} 行的 original_price 不能小于 0`);
+        }
+
+        return {
+            index: index + 1,
+            title: row.title || '',
+            description: row.description || '',
+            price,
+            images: String(row.images || '').split('|').map(item => item.trim()).filter(Boolean),
+            category: row.category || '',
+            location: row.location || '',
+            original_price: originalPrice
+        };
+    });
+}
+
+async function handleBatchPublishCsvSelection(event) {
+    const file = event.target.files?.[0];
+    if (!file) {
+        return;
+    }
+
+    try {
+        const text = await file.text();
+        productPublishState.batchProducts = parseProductPublishCsv(text);
+        renderBatchPublishProducts();
+        showToast(`已导入 ${productPublishState.batchProducts.length} 个商品`, 'success');
+    } catch (error) {
+        console.error('解析批量发布 CSV 失败:', error);
+        showToast(error.message || '解析 CSV 失败', 'danger');
+        clearBatchPublishProducts();
+    }
+}
+
+function renderBatchPublishProducts() {
+    const tbody = document.getElementById('batchProductPublishTableBody');
+    const summary = document.getElementById('batchPublishSummary');
+    if (!tbody || !summary) return;
+
+    if (!productPublishState.batchProducts.length) {
+        summary.textContent = '尚未导入商品';
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">导入 CSV 后会在这里预览</td></tr>';
+        return;
+    }
+
+    summary.textContent = `已导入 ${productPublishState.batchProducts.length} 个商品`;
+    tbody.innerHTML = productPublishState.batchProducts.map((product, index) => `
+        <tr>
+            <td>${index + 1}</td>
+            <td>
+                <div class="fw-semibold">${escapeHtml(product.title || `商品 ${index + 1}`)}</div>
+                <div class="small text-muted text-truncate" style="max-width: 280px;" title="${escapeHtml(product.description)}">${escapeHtml(product.description)}</div>
+            </td>
+            <td>${escapeHtml(String(product.price))}</td>
+            <td>${escapeHtml(String(product.images.length))} 张</td>
+            <td>${escapeHtml(product.category || '-')}</td>
+        </tr>
+    `).join('');
+}
+
+function renderBatchPublishResult(result) {
+    const container = document.getElementById('batchProductPublishResult');
+    if (!container) return;
+
+    const details = result?.results?.details || [];
+    const detailLines = details.slice(0, 8).map(detail => {
+        const title = escapeHtml(detail.title || `商品 ${detail.index || ''}`);
+        const status = detail.status === 'success' ? '成功' : '失败';
+        const suffix = detail.product_url
+            ? ` <a href="${detail.product_url}" target="_blank" rel="noopener noreferrer">查看</a>`
+            : (detail.error ? `：${escapeHtml(detail.error)}` : '');
+        return `<li>${title} ${status}${suffix}</li>`;
+    }).join('');
+
+    container.className = `alert mt-3 ${result?.success ? 'alert-success' : 'alert-warning'}`;
+    container.innerHTML = `
+        <div class="fw-semibold">${escapeHtml(result?.message || '批量发布完成')}</div>
+        <div class="small mt-1">
+            总数 ${escapeHtml(String(result?.results?.total || 0))}，
+            成功 ${escapeHtml(String(result?.results?.success || 0))}，
+            失败 ${escapeHtml(String(result?.results?.failed || 0))}
+        </div>
+        ${detailLines ? `<ul class="small mt-2 mb-0 ps-3">${detailLines}</ul>` : ''}
+    `;
+}
+
+async function submitBatchPublishProducts() {
+    const cookieId = document.getElementById('batchProductPublishCookieId')?.value || '';
+    if (!cookieId) {
+        showToast('请选择批量发布账号', 'warning');
+        return;
+    }
+    if (!productPublishState.batchProducts.length) {
+        showToast('请先导入 CSV 数据', 'warning');
+        return;
+    }
+
+    const submitBtn = document.getElementById('batchProductPublishSubmitBtn');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>批量发布中...';
+    }
+
+    try {
+        const result = await fetchJSON(`${apiBase}/api/products/batch-publish`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                cookie_id: cookieId,
+                products: productPublishState.batchProducts
+            })
+        });
+
+        renderBatchPublishResult(result || {});
+        if (result?.success) {
+            showToast(result.message || '批量发布完成', 'success');
+        } else {
+            showToast(result?.message || '批量发布失败', 'warning');
+        }
+        await loadProductPublishHistory();
+    } catch (error) {
+        console.error('批量发布失败:', error);
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="bi bi-cloud-upload me-1"></i>批量发布';
+        }
+    }
+}
+
+async function loadProductPublishHistory() {
+    try {
+        const data = await fetchJSON(`${apiBase}/api/products/publish-history?limit=20`);
+        if (!data?.success) {
+            return;
+        }
+
+        const stats = data.stats || {};
+        const history = data.history || [];
+
+        const totalEl = document.getElementById('productPublishStatsTotal');
+        const successEl = document.getElementById('productPublishStatsSuccess');
+        const failedEl = document.getElementById('productPublishStatsFailed');
+        const rateEl = document.getElementById('productPublishStatsRate');
+        if (totalEl) totalEl.textContent = stats.total || 0;
+        if (successEl) successEl.textContent = stats.success || 0;
+        if (failedEl) failedEl.textContent = stats.failed || 0;
+        if (rateEl) rateEl.textContent = `${stats.success_rate || 0}%`;
+
+        const tbody = document.getElementById('productPublishHistoryTableBody');
+        if (!tbody) return;
+
+        if (!history.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">暂无发布记录</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = history.map(item => {
+            const statusTone = item.status === 'success'
+                ? 'success'
+                : (item.status === 'duplicate' ? 'warning' : 'danger');
+            const statusText = item.status === 'success'
+                ? '成功'
+                : (item.status === 'duplicate' ? '重复跳过' : '失败');
+            const resultText = item.product_url
+                ? `<a href="${item.product_url}" target="_blank" rel="noopener noreferrer">查看商品</a>`
+                : escapeHtml(item.error_message || '-');
+
+            return `
+                <tr>
+                    <td>${escapeHtml(item.published_at || '-')}</td>
+                    <td>${escapeHtml(item.cookie_id || '-')}</td>
+                    <td>
+                        <div class="fw-semibold">${escapeHtml(item.title || '-')}</div>
+                        ${item.product_id ? `<div class="small text-muted">ID: ${escapeHtml(item.product_id)}</div>` : ''}
+                    </td>
+                    <td>${item.price !== null && item.price !== undefined ? escapeHtml(String(item.price)) : '-'}</td>
+                    <td><span class="badge text-bg-${statusTone}">${statusText}</span></td>
+                    <td>${resultText}</td>
+                </tr>
+            `;
+        }).join('');
+    } catch (error) {
+        console.error('加载商品发布历史失败:', error);
     }
 }
 

@@ -89,6 +89,12 @@
           <span>商品管理</span>
         </a>
       </div>
+      <div class="nav-item" data-menu-id="product-publish">
+        <a href="javascript:void(0)" class="nav-link" onclick="showSection('product-publish')">
+          <i class="bi bi-cloud-upload"></i>
+          <span>商品发布</span>
+        </a>
+      </div>
       <div class="nav-item" data-menu-id="orders">
         <a href="javascript:void(0)" class="nav-link" onclick="showSection('orders')">
           <i class="bi bi-receipt-cutoff"></i>
@@ -869,6 +875,289 @@
                   <option value="100">100条/页</option>
                 </select>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="product-publish-section" class="content-section">
+      <div class="content-header">
+        <h2 class="mb-0">
+          <i class="bi bi-cloud-upload me-2"></i>
+          商品发布
+        </h2>
+        <p class="text-muted mb-0">通过现有账号 Cookie 调起闲鱼发布页，支持单个和批量发布</p>
+      </div>
+
+      <div class="content-body">
+        <div class="alert alert-info mb-4">
+          <i class="bi bi-info-circle me-2"></i>
+          发布逻辑基于 Playwright 自动化。图片支持本地路径或先上传到本系统；若平台触发验证码，需要先在日志/截图中排查账号风控状态。
+        </div>
+
+        <div class="row g-4">
+          <div class="col-xl-6">
+            <div class="card h-100">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-send me-2"></i>单个发布</h5>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadProductPublishPage()">
+                  <i class="bi bi-arrow-clockwise me-1"></i>刷新账号
+                </button>
+              </div>
+              <div class="card-body">
+                <form id="productPublishSingleForm" onsubmit="submitProductPublishForm(event)">
+                  <div class="row g-3">
+                    <div class="col-12">
+                      <div class="alert alert-light border mb-0">
+                        <div class="row g-2 align-items-end">
+                          <div class="col-md-8">
+                            <label class="form-label">套用商品模板</label>
+                            <select class="form-select" id="productPublishTemplateSelect">
+                              <option value="">不使用模板</option>
+                            </select>
+                          </div>
+                          <div class="col-md-4 d-flex gap-2">
+                            <button type="button" class="btn btn-outline-secondary flex-fill" onclick="applySelectedProductTemplate()">套用模板</button>
+                            <button type="button" class="btn btn-outline-secondary flex-fill" onclick="resetProductTemplateForm()">新建模板</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="col-md-6">
+                      <label class="form-label">发布账号</label>
+                      <select class="form-select" id="productPublishCookieId" required>
+                        <option value="">请选择账号</option>
+                      </select>
+                    </div>
+                    <div class="col-md-6">
+                      <label class="form-label">商品标题（可选）</label>
+                      <input type="text" class="form-control" id="productPublishTitle" placeholder="用于发布页标题；留空则不主动填写标题">
+                    </div>
+                    <div class="col-md-4">
+                      <label class="form-label">售价（元）</label>
+                      <input type="number" class="form-control" id="productPublishPrice" min="0" step="0.01" required>
+                    </div>
+                    <div class="col-md-4">
+                      <label class="form-label">原价（元）</label>
+                      <input type="number" class="form-control" id="productPublishOriginalPrice" min="0" step="0.01">
+                    </div>
+                    <div class="col-md-6">
+                      <label class="form-label">分类（可选）</label>
+                      <input type="text" class="form-control" id="productPublishCategory" placeholder="例：数码产品/手机/苹果">
+                    </div>
+                    <div class="col-md-6">
+                      <label class="form-label">发货地（可选）</label>
+                      <input type="text" class="form-control" id="productPublishLocation" placeholder="例：浙江省/杭州市">
+                    </div>
+                    <div class="col-12">
+                      <label class="form-label">商品描述</label>
+                      <textarea class="form-control" id="productPublishDescription" rows="5" placeholder="建议包含成色、配置、交易说明等" required></textarea>
+                    </div>
+                    <div class="col-12">
+                      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                        <label class="form-label mb-0">商品图片</label>
+                        <label class="btn btn-outline-primary btn-sm mb-0">
+                          <i class="bi bi-images me-1"></i>上传并加入图片
+                          <input type="file" id="productPublishImages" class="d-none" accept="image/*" multiple onchange="handleProductPublishImageSelection(event)">
+                        </label>
+                      </div>
+                      <div id="productPublishImagesHelp" class="form-text mb-2">上传后会先保存到系统，再作为本地路径传给发布器。</div>
+                      <div id="productPublishImagesList" class="row g-2"></div>
+                    </div>
+                    <div class="col-12 d-flex justify-content-end gap-2">
+                      <button type="button" class="btn btn-outline-secondary" onclick="resetProductPublishSingleForm()">重置</button>
+                      <button type="submit" class="btn btn-primary" id="productPublishSubmitBtn">
+                        <i class="bi bi-cloud-upload me-1"></i>开始发布
+                      </button>
+                    </div>
+                  </div>
+                </form>
+
+                <div id="productPublishSingleResult" class="alert mt-3 d-none"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-xl-6">
+            <div class="card h-100">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-file-earmark-spreadsheet me-2"></i>批量发布</h5>
+                <div class="d-flex gap-2">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="downloadProductPublishTemplate()">
+                    <i class="bi bi-download me-1"></i>模板
+                  </button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearBatchPublishProducts()">
+                    <i class="bi bi-trash me-1"></i>清空
+                  </button>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="row g-3 mb-3">
+                  <div class="col-md-6">
+                    <label class="form-label">发布账号</label>
+                    <select class="form-select" id="batchProductPublishCookieId" required>
+                      <option value="">请选择账号</option>
+                    </select>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">导入 CSV</label>
+                    <input type="file" class="form-control" id="batchProductPublishCsv" accept=".csv,text/csv" onchange="handleBatchPublishCsvSelection(event)">
+                  </div>
+                </div>
+
+                <div class="alert alert-light border mb-3">
+                  <div class="fw-semibold mb-1">CSV 列说明</div>
+                  <div class="small text-muted">`title,description,price,images,category,location,original_price`</div>
+                  <div class="small text-muted">`title` 为发布页商品标题，可留空；留空时仅使用描述生成历史记录标题，不主动填写平台标题字段。</div>
+                  <div class="small text-muted">`description` 支持用双引号包裹多行内容；`price` 和 `original_price` 需要是有效数字，支持 `4999` 或 `4,999`。</div>
+                  <div class="small text-muted">其中 `images` 使用 `|` 分隔多张图片路径，可直接填写绝对路径或系统上传后的 `static/uploads/...` 路径。</div>
+                </div>
+
+                <div id="batchPublishSummary" class="small text-muted mb-2">尚未导入商品</div>
+                <div class="table-responsive" style="max-height: 320px;">
+                  <table class="table table-sm align-middle">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>标题</th>
+                        <th>价格</th>
+                        <th>图片</th>
+                        <th>分类</th>
+                      </tr>
+                    </thead>
+                    <tbody id="batchProductPublishTableBody">
+                      <tr>
+                        <td colspan="5" class="text-center text-muted py-4">导入 CSV 后会在这里预览</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="d-flex justify-content-end mt-3">
+                  <button type="button" class="btn btn-primary" id="batchProductPublishSubmitBtn" onclick="submitBatchPublishProducts()">
+                    <i class="bi bi-cloud-upload me-1"></i>批量发布
+                  </button>
+                </div>
+
+                <div id="batchProductPublishResult" class="alert mt-3 d-none"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card mt-4">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0"><i class="bi bi-bookmark-star me-2"></i>商品模板</h5>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadProductPublishTemplates()">
+              <i class="bi bi-arrow-clockwise me-1"></i>刷新模板
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="row g-4">
+              <div class="col-lg-5">
+                <form id="productTemplateForm" onsubmit="submitProductTemplateForm(event)">
+                  <input type="hidden" id="productTemplateId">
+                  <div class="mb-3">
+                    <label class="form-label">模板名称</label>
+                    <input type="text" class="form-control" id="productTemplateName" placeholder="例：苹果手机模板" required>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">默认分类</label>
+                    <input type="text" class="form-control" id="productTemplateCategory" placeholder="例：数码产品/手机/苹果">
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">默认发货地</label>
+                    <input type="text" class="form-control" id="productTemplateLocation" placeholder="例：浙江省/杭州市">
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">描述模板</label>
+                    <textarea class="form-control" id="productTemplateDescription" rows="5" placeholder="可预设常用成色说明、交易说明。"></textarea>
+                    <div class="form-text">套用模板时会填充到单个发布表单，可再手工修改。</div>
+                  </div>
+                  <div class="d-flex justify-content-end gap-2">
+                    <button type="button" class="btn btn-outline-secondary" onclick="resetProductTemplateForm()">清空</button>
+                    <button type="submit" class="btn btn-primary" id="productTemplateSubmitBtn">保存模板</button>
+                  </div>
+                </form>
+              </div>
+
+              <div class="col-lg-7">
+                <div class="table-responsive">
+                  <table class="table table-hover align-middle">
+                    <thead>
+                      <tr>
+                        <th>模板名</th>
+                        <th>分类/地区</th>
+                        <th>描述预览</th>
+                        <th class="text-end">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="productTemplateTableBody">
+                      <tr>
+                        <td colspan="4" class="text-center text-muted py-4">暂无模板</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card mt-4">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0"><i class="bi bi-clock-history me-2"></i>发布历史</h5>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadProductPublishHistory()">
+              <i class="bi bi-arrow-clockwise me-1"></i>刷新历史
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="row g-3 mb-3">
+              <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                  <div class="text-muted small">总发布次数</div>
+                  <div class="fs-4 fw-semibold" id="productPublishStatsTotal">0</div>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                  <div class="text-muted small">成功</div>
+                  <div class="fs-4 fw-semibold text-success" id="productPublishStatsSuccess">0</div>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                  <div class="text-muted small">失败/跳过</div>
+                  <div class="fs-4 fw-semibold text-danger" id="productPublishStatsFailed">0</div>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                  <div class="text-muted small">成功率</div>
+                  <div class="fs-4 fw-semibold" id="productPublishStatsRate">0%</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="table-responsive">
+              <table class="table table-hover align-middle">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>账号</th>
+                    <th>标题</th>
+                    <th>价格</th>
+                    <th>状态</th>
+                    <th>结果</th>
+                  </tr>
+                </thead>
+                <tbody id="productPublishHistoryTableBody">
+                  <tr>
+                    <td colspan="6" class="text-center text-muted py-4">暂无发布记录</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

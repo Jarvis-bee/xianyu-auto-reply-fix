@@ -2463,6 +2463,112 @@ def _ensure_cookie_access(cid: str, current_user: Dict[str, Any]) -> str:
     return cleaned_cid
 
 
+class PublishProductPayload(BaseModel):
+    cookie_id: Optional[str] = None
+    title: Optional[str] = None
+    description: str
+    price: float
+    images: List[str]
+    category: Optional[str] = None
+    location: Optional[str] = None
+    original_price: Optional[float] = None
+
+
+class PublishBatchProductsPayload(BaseModel):
+    cookie_id: str
+    products: List[PublishProductPayload]
+
+
+class ProductTemplatePayload(BaseModel):
+    name: str
+    category: Optional[str] = None
+    location: Optional[str] = None
+    description_template: Optional[str] = None
+
+
+def _normalize_publish_title(raw_title: Optional[str]) -> Optional[str]:
+    title = (raw_title or '').strip()
+    return title or None
+
+
+def _build_publish_history_title(raw_title: Optional[str], raw_description: str) -> str:
+    title = (raw_title or '').strip()
+    if title:
+        return title[:80]
+
+    compact_description = re.sub(r'\s+', ' ', (raw_description or '').strip())
+    return compact_description[:80] if compact_description else '未命名商品'
+
+
+def _build_publish_product_hash(
+    title: str,
+    price: float,
+    description: str,
+    image_fingerprints: List[str],
+    original_price: Optional[float] = None,
+    category: Optional[str] = None,
+    location: Optional[str] = None,
+) -> str:
+    fingerprint = {
+        'title': title or '',
+        'price': price,
+        'description': description or '',
+        'images': [str(fingerprint or '').strip() for fingerprint in image_fingerprints or []],
+        'original_price': original_price,
+        'category': (category or '').strip(),
+        'location': (location or '').strip(),
+    }
+    content = json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(content.encode('utf-8')).hexdigest()
+
+
+def _resolve_publish_image_paths(image_paths: List[str]) -> List[str]:
+    resolved_paths: List[str] = []
+
+    for raw_path in image_paths or []:
+        candidate = str(raw_path or '').strip()
+        if not candidate:
+            continue
+
+        if candidate.startswith(('http://', 'https://')):
+            raise HTTPException(status_code=400, detail="发布商品暂不支持远程图片 URL，请先上传到系统或使用本地路径")
+
+        if candidate.startswith('/static/'):
+            normalized_path = candidate.lstrip('/')
+        elif os.path.isabs(candidate):
+            normalized_path = candidate
+        else:
+            normalized_path = candidate.lstrip('/')
+
+        absolute_path = normalized_path if os.path.isabs(normalized_path) else os.path.abspath(normalized_path)
+        if not os.path.exists(absolute_path):
+            raise HTTPException(status_code=400, detail=f"图片不存在: {candidate}")
+
+        resolved_paths.append(absolute_path)
+
+    if not resolved_paths:
+        raise HTTPException(status_code=400, detail="至少需要一张有效图片")
+
+    return resolved_paths
+
+
+def _build_publish_image_fingerprints(image_paths: List[str]) -> List[str]:
+    fingerprints: List[str] = []
+
+    for image_path in image_paths or []:
+        md5_hash = hashlib.md5()
+        try:
+            with open(image_path, 'rb') as image_file:
+                for chunk in iter(lambda: image_file.read(1024 * 1024), b''):
+                    md5_hash.update(chunk)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"读取图片失败: {Path(image_path).name}") from e
+
+        fingerprints.append(md5_hash.hexdigest())
+
+    return fingerprints
+
+
 def _normalize_runtime_timestamp(value: Any) -> Optional[float]:
     try:
         timestamp = float(value)
@@ -8208,6 +8314,407 @@ async def get_items_by_page(request: dict, current_user: Dict[str, Any] = Depend
         return {"success": False, "message": f"获取商品信息异常: {str(e)}"}
 
 
+# ==================== 商品发布 API ====================
+
+@app.post("/api/products/publish")
+async def publish_product(
+    body: PublishProductPayload,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """发布单个商品到闲鱼。"""
+    cookie_id = _ensure_cookie_access(body.cookie_id, current_user)
+    publish_title = _normalize_publish_title(body.title)
+    record_title = _build_publish_history_title(publish_title, body.description)
+    user_id = current_user['user_id']
+
+    image_paths = _resolve_publish_image_paths(body.images)
+    image_fingerprints = _build_publish_image_fingerprints(image_paths)
+    product_hash = _build_publish_product_hash(
+        record_title,
+        body.price,
+        body.description,
+        image_fingerprints,
+        original_price=body.original_price,
+        category=body.category,
+        location=body.location,
+    )
+
+    existing_product = db_manager.get_product_by_hash(cookie_id, product_hash)
+    if existing_product:
+        return {
+            "success": False,
+            "message": "检测到相同内容的商品已发布，已跳过重复发布",
+            "existing_product": existing_product
+        }
+
+    cookie_info = db_manager.get_cookie_by_id(cookie_id)
+    if not cookie_info:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    cookies_str = cookie_info.get('cookies_str', '')
+    if not cookies_str:
+        raise HTTPException(status_code=400, detail="账号 Cookie 为空")
+
+    from product_publisher import XianyuProductPublisher, ProductInfo
+
+    publisher: Optional[XianyuProductPublisher] = None
+    try:
+        publisher = XianyuProductPublisher(cookie_id=cookie_id, cookies_str=cookies_str, headless=True)
+        await publisher.init_browser()
+
+        login_success = await publisher.login_with_cookie()
+        if not login_success:
+            db_manager.add_publish_history(
+                user_id=user_id,
+                cookie_id=cookie_id,
+                title=record_title,
+                price=body.price,
+                status='failed',
+                error_message='Cookie 登录失败',
+                product_hash=product_hash,
+            )
+            return {"success": False, "message": "Cookie 登录失败，请先确认账号状态"}
+
+        product = ProductInfo(
+            title=publish_title or '',
+            description=body.description,
+            price=body.price,
+            images=image_paths,
+            category=body.category,
+            location=body.location,
+            original_price=body.original_price,
+        )
+
+        success, product_id, product_url = await publisher.publish_product(product)
+        if success:
+            db_manager.save_published_product_with_hash(
+                user_id=user_id,
+                cookie_id=cookie_id,
+                product_id=product_id,
+                product_url=product_url,
+                title=record_title,
+                price=body.price,
+                product_hash=product_hash,
+            )
+            return {
+                "success": True,
+                "message": "商品发布成功",
+                "product_id": product_id,
+                "product_url": product_url,
+            }
+
+        db_manager.add_publish_history(
+            user_id=user_id,
+            cookie_id=cookie_id,
+            title=record_title,
+            price=body.price,
+            status='failed',
+            error_message='发布流程未通过平台校验',
+            product_hash=product_hash,
+        )
+        return {"success": False, "message": "商品发布失败，请查看日志和截图"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"商品发布异常: {e}")
+        db_manager.add_publish_history(
+            user_id=user_id,
+            cookie_id=cookie_id,
+            title=record_title,
+            price=body.price,
+            status='failed',
+            error_message=str(e),
+            product_hash=product_hash,
+        )
+        raise HTTPException(status_code=500, detail=f"商品发布异常: {str(e)}")
+    finally:
+        if publisher:
+            await publisher.close()
+
+
+@app.post("/api/products/batch-publish")
+async def batch_publish_products(
+    body: PublishBatchProductsPayload,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """批量发布商品到闲鱼。"""
+    cookie_id = _ensure_cookie_access(body.cookie_id, current_user)
+    if not body.products:
+        return {"success": False, "message": "请至少提供一个待发布商品", "results": {"total": 0, "success": 0, "failed": 0, "details": []}}
+
+    cookie_info = db_manager.get_cookie_by_id(cookie_id)
+    if not cookie_info:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    cookies_str = cookie_info.get('cookies_str', '')
+    if not cookies_str:
+        raise HTTPException(status_code=400, detail="账号 Cookie 为空")
+
+    from product_publisher import XianyuProductPublisher, ProductInfo
+
+    user_id = current_user['user_id']
+    details = []
+    success_count = 0
+    failed_count = 0
+    publisher: Optional[XianyuProductPublisher] = None
+
+    try:
+        publisher = XianyuProductPublisher(cookie_id=cookie_id, cookies_str=cookies_str, headless=True)
+        await publisher.init_browser()
+
+        login_success = await publisher.login_with_cookie()
+        if not login_success:
+            return {"success": False, "message": "Cookie 登录失败，请先确认账号状态", "results": {"total": len(body.products), "success": 0, "failed": len(body.products), "details": []}}
+
+        for index, product_data in enumerate(body.products, start=1):
+            publish_title = _normalize_publish_title(product_data.title)
+            record_title = _build_publish_history_title(publish_title, product_data.description)
+            product_hash = None
+            try:
+                image_paths = _resolve_publish_image_paths(product_data.images)
+                image_fingerprints = _build_publish_image_fingerprints(image_paths)
+                product_hash = _build_publish_product_hash(
+                    record_title,
+                    product_data.price,
+                    product_data.description,
+                    image_fingerprints,
+                    original_price=product_data.original_price,
+                    category=product_data.category,
+                    location=product_data.location,
+                )
+
+                existing_product = db_manager.get_product_by_hash(cookie_id, product_hash)
+                if existing_product:
+                    failed_count += 1
+                    db_manager.add_publish_history(
+                        user_id=user_id,
+                        cookie_id=cookie_id,
+                        title=record_title,
+                        price=product_data.price,
+                        status='duplicate',
+                        error_message='重复发布已跳过',
+                        product_id=existing_product.get('product_id'),
+                        product_url=existing_product.get('product_url'),
+                        product_hash=product_hash,
+                    )
+                    details.append({
+                        "index": index,
+                        "title": record_title,
+                        "status": "failed",
+                        "error": "重复发布已跳过",
+                        "product_id": existing_product.get('product_id'),
+                        "product_url": existing_product.get('product_url'),
+                    })
+                    continue
+
+                product = ProductInfo(
+                    title=publish_title or '',
+                    description=product_data.description,
+                    price=product_data.price,
+                    images=image_paths,
+                    category=product_data.category,
+                    location=product_data.location,
+                    original_price=product_data.original_price,
+                )
+                success, product_id, product_url = await publisher.publish_product(product)
+
+                if success:
+                    success_count += 1
+                    db_manager.save_published_product_with_hash(
+                        user_id=user_id,
+                        cookie_id=cookie_id,
+                        product_id=product_id,
+                        product_url=product_url,
+                        title=record_title,
+                        price=product_data.price,
+                        product_hash=product_hash,
+                    )
+                    details.append({
+                        "index": index,
+                        "title": record_title,
+                        "status": "success",
+                        "product_id": product_id,
+                        "product_url": product_url,
+                    })
+                else:
+                    failed_count += 1
+                    db_manager.add_publish_history(
+                        user_id=user_id,
+                        cookie_id=cookie_id,
+                        title=record_title,
+                        price=product_data.price,
+                        status='failed',
+                        error_message='发布流程未通过平台校验',
+                        product_hash=product_hash,
+                    )
+                    details.append({
+                        "index": index,
+                        "title": record_title,
+                        "status": "failed",
+                        "error": "发布流程未通过平台校验",
+                    })
+            except HTTPException as e:
+                failed_count += 1
+                db_manager.add_publish_history(
+                    user_id=user_id,
+                    cookie_id=cookie_id,
+                    title=record_title,
+                    price=product_data.price,
+                    status='failed',
+                    error_message=e.detail,
+                    product_hash=product_hash,
+                )
+                details.append({
+                    "index": index,
+                    "title": record_title,
+                    "status": "failed",
+                    "error": e.detail,
+                })
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"批量发布第 {index} 个商品失败: {e}")
+                db_manager.add_publish_history(
+                    user_id=user_id,
+                    cookie_id=cookie_id,
+                    title=record_title,
+                    price=product_data.price,
+                    status='failed',
+                    error_message=str(e),
+                    product_hash=product_hash,
+                )
+                details.append({
+                    "index": index,
+                    "title": record_title,
+                    "status": "failed",
+                    "error": str(e),
+                })
+
+        return {
+            "success": failed_count == 0,
+            "completed": True,
+            "message": f"批量发布完成: 成功 {success_count}/{len(body.products)}",
+            "results": {
+                "total": len(body.products),
+                "success": success_count,
+                "failed": failed_count,
+                "details": details,
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量发布商品异常: {e}")
+        raise HTTPException(status_code=500, detail=f"批量发布异常: {str(e)}")
+    finally:
+        if publisher:
+            await publisher.close()
+
+
+@app.get("/api/products/publish-history")
+async def get_publish_history(limit: int = 20, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取当前用户的商品发布历史和统计。"""
+    safe_limit = max(1, min(int(limit or 20), 100))
+    user_id = current_user['user_id']
+    history = db_manager.get_publish_history(user_id, limit=safe_limit, offset=0)
+    stats = db_manager.get_publish_statistics(user_id)
+    return {
+        "success": True,
+        "history": history,
+        "stats": stats,
+    }
+
+
+@app.get("/api/products/publish-statistics")
+async def get_publish_statistics(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取当前用户的商品发布统计。"""
+    user_id = current_user['user_id']
+    return {
+        "success": True,
+        "statistics": db_manager.get_publish_statistics(user_id)
+    }
+
+
+@app.get("/api/products/templates")
+async def get_product_templates(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取商品模板列表。"""
+    user_id = current_user['user_id']
+    return {
+        "success": True,
+        "templates": db_manager.get_product_templates(user_id)
+    }
+
+
+@app.post("/api/products/templates")
+async def create_product_template(
+    payload: ProductTemplatePayload,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """创建商品模板。"""
+    user_id = current_user['user_id']
+    template_name = payload.name.strip()
+    if not template_name:
+        raise HTTPException(status_code=400, detail="模板名称不能为空")
+    template_id = db_manager.create_product_template(
+        user_id=user_id,
+        name=template_name,
+        category=(payload.category or '').strip() or None,
+        location=(payload.location or '').strip() or None,
+        description_template=(payload.description_template or '').strip() or None,
+    )
+
+    if not template_id:
+        raise HTTPException(status_code=500, detail="模板创建失败")
+
+    return {
+        "success": True,
+        "message": "模板创建成功",
+        "template_id": template_id,
+    }
+
+
+@app.put("/api/products/templates/{template_id}")
+async def update_product_template(
+    template_id: int,
+    payload: ProductTemplatePayload,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """更新商品模板。"""
+    user_id = current_user['user_id']
+    template_name = payload.name.strip()
+    if not template_name:
+        raise HTTPException(status_code=400, detail="模板名称不能为空")
+    success = db_manager.update_product_template(
+        template_id=template_id,
+        user_id=user_id,
+        name=template_name,
+        category=(payload.category or '').strip() or None,
+        location=(payload.location or '').strip() or None,
+        description_template=(payload.description_template or '').strip() or None,
+    )
+
+    if not success:
+        raise HTTPException(status_code=404, detail="模板不存在或无权限")
+
+    return {
+        "success": True,
+        "message": "模板更新成功",
+    }
+
+
+@app.delete("/api/products/templates/{template_id}")
+async def delete_product_template(template_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """删除商品模板。"""
+    user_id = current_user['user_id']
+    success = db_manager.delete_product_template(template_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="模板不存在或无权限")
+
+    return {
+        "success": True,
+        "message": "模板删除成功",
+    }
+
+
 # ------------------------- 用户设置接口 -------------------------
 
 @app.get('/user-settings')
@@ -9029,7 +9536,8 @@ def get_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require
             'users', 'cookies', 'cookie_status', 'keywords', 'default_replies', 'default_reply_records',
             'ai_reply_settings', 'ai_conversations', 'ai_item_cache', 'item_info',
             'message_notifications', 'cards', 'delivery_rules', 'notification_channels',
-            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', "item_replay"
+            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', "item_replay",
+            'product_templates', 'product_publish_history'
         ]
 
         if table_name not in allowed_tables:
@@ -9068,7 +9576,7 @@ def export_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(requ
             'ai_reply_settings', 'ai_conversations', 'ai_item_cache', 'item_info',
             'message_notifications', 'cards', 'delivery_rules', 'notification_channels',
             'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', 'item_replay',
-            'risk_control_logs'
+            'risk_control_logs', 'product_templates', 'product_publish_history'
         ]
 
         if table_name not in allowed_tables:
@@ -9131,7 +9639,8 @@ def delete_table_record(table_name: str, record_id: str, admin_user: Dict[str, A
             'users', 'cookies', 'cookie_status', 'keywords', 'default_replies', 'default_reply_records',
             'ai_reply_settings', 'ai_conversations', 'ai_item_cache', 'item_info',
             'message_notifications', 'cards', 'delivery_rules', 'notification_channels',
-            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders','item_replay'
+            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders','item_replay',
+            'product_templates', 'product_publish_history'
         ]
 
         if table_name not in allowed_tables:
@@ -9172,7 +9681,7 @@ def clear_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(requi
             'ai_reply_settings', 'ai_conversations', 'ai_item_cache', 'item_info',
             'message_notifications', 'cards', 'delivery_rules', 'notification_channels',
             'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', 'item_replay',
-            'risk_control_logs'
+            'risk_control_logs', 'product_templates', 'product_publish_history'
         ]
 
         # 不允许清空用户表

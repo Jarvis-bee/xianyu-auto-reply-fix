@@ -826,6 +826,39 @@ class DBManager:
             )
             ''')
 
+            # 创建商品模板表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS product_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                category TEXT,
+                location TEXT,
+                description_template TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            ''')
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_product_templates_user_id ON product_templates(user_id)")
+
+            # 创建商品发布历史表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS product_publish_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                cookie_id TEXT,
+                title TEXT,
+                price REAL,
+                status TEXT DEFAULT 'success',
+                error_message TEXT,
+                published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE SET NULL
+            )
+            ''')
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_product_publish_history_user_time ON product_publish_history(user_id, published_at DESC)")
+
             # 插入默认通知模板
             cursor.execute('''
             INSERT OR IGNORE INTO notification_templates (type, template) VALUES
@@ -7548,7 +7581,9 @@ Cookie数量: {cookie_count}
                     'system_settings': 'id',
                     'email_verifications': 'id',
                     'captcha_codes': 'id',
-                    'orders': 'order_id'
+                    'orders': 'order_id',
+                    'product_templates': 'id',
+                    'product_publish_history': 'id'
                 }
 
                 primary_key = primary_key_map.get(table_name, 'id')
@@ -7589,6 +7624,310 @@ Cookie数量: {cookie_count}
                 logger.error(f"清空表数据失败: {table_name} - {e}")
                 self.conn.rollback()
                 return False
+
+    def create_product_template(
+        self,
+        user_id: int,
+        name: str,
+        category: str = None,
+        location: str = None,
+        description_template: str = None
+    ) -> Optional[int]:
+        """创建商品模板。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                self._execute_sql(cursor, '''
+                    INSERT INTO product_templates (user_id, name, category, location, description_template)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (user_id, name, category, location, description_template))
+                self.conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"创建商品模板失败: {e}")
+            self.conn.rollback()
+            return None
+
+    def get_product_templates(self, user_id: int) -> List[Dict[str, Any]]:
+        """获取用户的所有商品模板。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                self._execute_sql(cursor, '''
+                    SELECT id, user_id, name, category, location, description_template, created_at, updated_at
+                    FROM product_templates
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC, id DESC
+                ''', (user_id,))
+
+                templates = []
+                for row in cursor.fetchall():
+                    templates.append({
+                        'id': row[0],
+                        'user_id': row[1],
+                        'name': row[2],
+                        'category': row[3],
+                        'location': row[4],
+                        'description_template': row[5],
+                        'created_at': row[6],
+                        'updated_at': row[7],
+                    })
+                return templates
+        except Exception as e:
+            logger.error(f"获取商品模板失败: {e}")
+            return []
+
+    def get_product_template_by_id(self, template_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        """获取单个商品模板。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                self._execute_sql(cursor, '''
+                    SELECT id, user_id, name, category, location, description_template, created_at, updated_at
+                    FROM product_templates
+                    WHERE id = ? AND user_id = ?
+                ''', (template_id, user_id))
+
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return {
+                    'id': row[0],
+                    'user_id': row[1],
+                    'name': row[2],
+                    'category': row[3],
+                    'location': row[4],
+                    'description_template': row[5],
+                    'created_at': row[6],
+                    'updated_at': row[7],
+                }
+        except Exception as e:
+            logger.error(f"获取商品模板详情失败: {e}")
+            return None
+
+    def update_product_template(self, template_id: int, user_id: int, **kwargs) -> bool:
+        """更新商品模板。"""
+        try:
+            with self.lock:
+                allowed_fields = ['name', 'category', 'location', 'description_template']
+                update_fields = []
+                params = []
+
+                for field in allowed_fields:
+                    if field in kwargs:
+                        update_fields.append(f"{field} = ?")
+                        params.append(kwargs[field])
+
+                if not update_fields:
+                    return False
+
+                update_fields.append("updated_at = CURRENT_TIMESTAMP")
+                params.extend([template_id, user_id])
+
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    f"UPDATE product_templates SET {', '.join(update_fields)} WHERE id = ? AND user_id = ?",
+                    tuple(params)
+                )
+
+                if cursor.rowcount <= 0:
+                    return False
+
+                self.conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"更新商品模板失败: {e}")
+            self.conn.rollback()
+            return False
+
+    def delete_product_template(self, template_id: int, user_id: int) -> bool:
+        """删除商品模板。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                self._execute_sql(cursor, '''
+                    DELETE FROM product_templates
+                    WHERE id = ? AND user_id = ?
+                ''', (template_id, user_id))
+
+                if cursor.rowcount <= 0:
+                    return False
+
+                self.conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"删除商品模板失败: {e}")
+            self.conn.rollback()
+            return False
+
+    def _ensure_product_publish_history_columns(self, cursor) -> List[str]:
+        """确保商品发布历史表具备发布追踪所需字段。"""
+        self._execute_sql(cursor, "PRAGMA table_info(product_publish_history)")
+        columns = [col[1] for col in cursor.fetchall()]
+
+        if 'product_id' not in columns:
+            logger.info("为 product_publish_history 表添加 product_id 列...")
+            self._execute_sql(cursor, "ALTER TABLE product_publish_history ADD COLUMN product_id TEXT")
+            columns.append('product_id')
+
+        if 'product_url' not in columns:
+            logger.info("为 product_publish_history 表添加 product_url 列...")
+            self._execute_sql(cursor, "ALTER TABLE product_publish_history ADD COLUMN product_url TEXT")
+            columns.append('product_url')
+
+        if 'product_hash' not in columns:
+            logger.info("为 product_publish_history 表添加 product_hash 列...")
+            self._execute_sql(cursor, "ALTER TABLE product_publish_history ADD COLUMN product_hash TEXT")
+            columns.append('product_hash')
+
+        self._execute_sql(
+            cursor,
+            "CREATE INDEX IF NOT EXISTS idx_product_publish_history_cookie_hash ON product_publish_history(cookie_id, product_hash)"
+        )
+        return columns
+
+    def add_publish_history(
+        self,
+        user_id: int,
+        cookie_id: str = None,
+        title: str = None,
+        price: float = None,
+        status: str = 'success',
+        error_message: str = None,
+        product_id: str = None,
+        product_url: str = None,
+        product_hash: str = None,
+    ) -> Optional[int]:
+        """记录商品发布历史。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                self._ensure_product_publish_history_columns(cursor)
+                self._execute_sql(cursor, '''
+                    INSERT INTO product_publish_history
+                    (user_id, cookie_id, title, price, status, error_message, product_id, product_url, product_hash, published_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (user_id, cookie_id, title, price, status, error_message, product_id, product_url, product_hash))
+                self.conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"记录商品发布历史失败: {e}")
+            self.conn.rollback()
+            return None
+
+    def get_publish_history(self, user_id: int, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+        """获取商品发布历史。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                self._ensure_product_publish_history_columns(cursor)
+                self._execute_sql(cursor, '''
+                    SELECT id, user_id, cookie_id, title, price, status, error_message,
+                           product_id, product_url, product_hash, published_at
+                    FROM product_publish_history
+                    WHERE user_id = ?
+                    ORDER BY published_at DESC, id DESC
+                    LIMIT ? OFFSET ?
+                ''', (user_id, limit, offset))
+
+                history = []
+                for row in cursor.fetchall():
+                    history.append({
+                        'id': row[0],
+                        'user_id': row[1],
+                        'cookie_id': row[2],
+                        'title': row[3],
+                        'price': row[4],
+                        'status': row[5],
+                        'error_message': row[6],
+                        'product_id': row[7],
+                        'product_url': row[8],
+                        'product_hash': row[9],
+                        'published_at': row[10],
+                    })
+                return history
+        except Exception as e:
+            logger.error(f"获取商品发布历史失败: {e}")
+            return []
+
+    def get_publish_statistics(self, user_id: int) -> Dict[str, Any]:
+        """获取商品发布统计信息。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                self._execute_sql(cursor, '''
+                    SELECT
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
+                        SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) AS failed
+                    FROM product_publish_history
+                    WHERE user_id = ?
+                ''', (user_id,))
+                row = cursor.fetchone() or (0, 0, 0)
+                total = row[0] or 0
+                success = row[1] or 0
+                failed = row[2] or 0
+                success_rate = round((success / total) * 100, 2) if total else 0
+                return {
+                    'total': total,
+                    'success': success,
+                    'failed': failed,
+                    'success_rate': success_rate,
+                }
+        except Exception as e:
+            logger.error(f"获取商品发布统计失败: {e}")
+            return {'total': 0, 'success': 0, 'failed': 0, 'success_rate': 0}
+
+    def get_product_by_hash(self, cookie_id: str, product_hash: str) -> Optional[Dict[str, Any]]:
+        """根据商品哈希值查询是否已发布过相同商品。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                self._ensure_product_publish_history_columns(cursor)
+                self._execute_sql(cursor, '''
+                    SELECT product_id, product_url, title, price, published_at
+                    FROM product_publish_history
+                    WHERE cookie_id = ? AND product_hash = ? AND status = 'success'
+                    ORDER BY published_at DESC, id DESC
+                    LIMIT 1
+                ''', (cookie_id, product_hash))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return {
+                    'product_id': row[0],
+                    'product_url': row[1],
+                    'title': row[2],
+                    'price': row[3],
+                    'published_at': row[4],
+                }
+        except Exception as e:
+            logger.error(f"根据哈希查询已发布商品失败: {e}")
+            return None
+
+    def save_published_product_with_hash(
+        self,
+        user_id: int,
+        cookie_id: str,
+        product_id: Optional[str],
+        product_url: Optional[str],
+        title: str,
+        price: float,
+        product_hash: str,
+    ) -> Optional[int]:
+        """保存已发布商品信息并记录去重哈希。"""
+        return self.add_publish_history(
+            user_id=user_id,
+            cookie_id=cookie_id,
+            title=title,
+            price=price,
+            status='success',
+            error_message=None,
+            product_id=product_id,
+            product_url=product_url,
+            product_hash=product_hash,
+        )
 
     def upgrade_keywords_table_for_image_support(self, cursor):
         """升级keywords表以支持图片关键词"""
