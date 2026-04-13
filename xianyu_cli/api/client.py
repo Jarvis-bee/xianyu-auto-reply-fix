@@ -89,9 +89,7 @@ class APIClient:
 
     def get_cookie_details(self) -> list[dict[str, Any]]:
         payload = self._request("GET", "/cookies/details")
-        if not isinstance(payload, list):
-            raise APIClientError("账号列表返回格式不正确", payload=payload)
-        return payload
+        return self._expect_list(payload, "账号列表返回格式不正确")
 
     def upload_image(self, image_path: str | Path) -> str:
         path = Path(image_path)
@@ -125,9 +123,51 @@ class APIClient:
             json_body=payload,
             timeout=self.publish_timeout,
         )
-        if not isinstance(response, dict):
-            raise APIClientError("发布接口返回格式不正确", payload=response)
-        return response
+        return self._expect_dict(response, "发布接口返回格式不正确")
+
+    def list_cards(self) -> list[dict[str, Any]]:
+        payload = self._request("GET", "/cards")
+        return self._expect_list(payload, "卡片列表返回格式不正确")
+
+    def get_card(self, card_id: int) -> dict[str, Any]:
+        payload = self._request("GET", f"/cards/{int(card_id)}")
+        return self._expect_dict(payload, "卡片详情返回格式不正确")
+
+    def create_card(self, payload: dict[str, Any]) -> dict[str, Any]:
+        response = self._request("POST", "/cards", json_body=payload)
+        return self._expect_dict(response, "卡片创建接口返回格式不正确")
+
+    def update_card(self, card_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        response = self._request("PUT", f"/cards/{int(card_id)}", json_body=payload)
+        return self._expect_dict(response, "卡片更新接口返回格式不正确")
+
+    def delete_card(self, card_id: int) -> dict[str, Any]:
+        response = self._request("DELETE", f"/cards/{int(card_id)}")
+        return self._expect_dict(response, "卡片删除接口返回格式不正确")
+
+    def list_delivery_rules(self) -> list[dict[str, Any]]:
+        payload = self._request("GET", "/delivery-rules")
+        return self._expect_list(payload, "发货规则列表返回格式不正确")
+
+    def get_delivery_rule(self, rule_id: int) -> dict[str, Any]:
+        payload = self._request("GET", f"/delivery-rules/{int(rule_id)}")
+        return self._expect_dict(payload, "发货规则详情返回格式不正确")
+
+    def create_delivery_rule(self, payload: dict[str, Any]) -> dict[str, Any]:
+        response = self._request("POST", "/delivery-rules", json_body=payload)
+        return self._expect_dict(response, "发货规则创建接口返回格式不正确")
+
+    def update_delivery_rule(self, rule_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        response = self._request("PUT", f"/delivery-rules/{int(rule_id)}", json_body=payload)
+        return self._expect_dict(response, "发货规则更新接口返回格式不正确")
+
+    def delete_delivery_rule(self, rule_id: int) -> dict[str, Any]:
+        response = self._request("DELETE", f"/delivery-rules/{int(rule_id)}")
+        return self._expect_dict(response, "发货规则删除接口返回格式不正确")
+
+    def get_delivery_rule_stats(self) -> dict[str, Any]:
+        payload = self._request("GET", "/delivery-rules/stats")
+        return self._expect_dict(payload, "发货统计接口返回格式不正确")
 
     def _request(
         self,
@@ -187,3 +227,13 @@ class APIClient:
             return f"请求失败 ({response.status_code}): {detail}"
 
         return f"请求失败 ({response.status_code})"
+
+    def _expect_dict(self, payload: Any, message: str) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise APIClientError(message, payload=payload)
+        return payload
+
+    def _expect_list(self, payload: Any, message: str) -> list[dict[str, Any]]:
+        if not isinstance(payload, list):
+            raise APIClientError(message, payload=payload)
+        return payload

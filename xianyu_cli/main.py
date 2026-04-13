@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
+from xianyu_cli.commands.card import register as register_card
+from xianyu_cli.commands.delivery_rule import register as register_delivery_rule
 from xianyu_cli.commands.publish import register as register_publish
 
 
@@ -10,6 +12,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="xianyu", description="闲鱼管理系统 CLI")
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
     register_publish(subparsers)
+    register_card(subparsers)
+    register_delivery_rule(subparsers)
     return parser
 
 

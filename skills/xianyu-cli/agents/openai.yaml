@@ -1,4 +1,4 @@
 interface:
   display_name: "Xianyu CLI"
-  short_description: "Build and extend the repo's Xianyu CLI workflow"
-  default_prompt: "Use $xianyu-cli to add or update a subcommand in this repo's xianyu CLI and validate it."
+  short_description: "Build and extend the repo's publish, card, and delivery-rule CLI flows"
+  default_prompt: "Use $xianyu-cli to add or update a subcommand in this repo's xianyu CLI, preserve the current FastAPI-backed contracts, and validate the installed command/help flow."

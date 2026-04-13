@@ -107,6 +107,36 @@ class APIClientTests(unittest.TestCase):
         self.assertEqual(dummy_client.calls[0]["file_name"], Path(tmp.name).name)
         self.assertEqual(dummy_client.calls[0]["content_type"], "image/png")
 
+    def test_list_cards_uses_cards_path(self) -> None:
+        client = APIClient("http://127.0.0.1:8090", "test-token")
+        client._client.close()
+        dummy_client = DummyHTTPClient(DummyResponse([{"id": 1, "name": "A"}]))
+        client._client = dummy_client
+
+        try:
+            cards = client.list_cards()
+        finally:
+            client.close()
+
+        self.assertEqual(cards[0]["id"], 1)
+        self.assertEqual(dummy_client.calls[0]["path"], "/cards")
+
+    def test_create_delivery_rule_posts_json(self) -> None:
+        client = APIClient("http://127.0.0.1:8090", "test-token")
+        client._client.close()
+        dummy_client = DummyHTTPClient(DummyResponse({"id": 5, "message": "ok"}))
+        client._client = dummy_client
+
+        try:
+            payload = {"keyword": "demo", "card_id": 1, "delivery_count": 1}
+            response = client.create_delivery_rule(payload)
+        finally:
+            client.close()
+
+        self.assertEqual(response["id"], 5)
+        self.assertEqual(dummy_client.calls[0]["path"], "/delivery-rules")
+        self.assertEqual(dummy_client.calls[0]["json"], payload)
+
 
 if __name__ == "__main__":
     unittest.main()
