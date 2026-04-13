@@ -309,7 +309,6 @@ config.*.yml
 .editorconfig
 .flake8
 .pylintrc
-pyproject.toml
 setup.cfg
 tox.ini
 
@@ -534,6 +533,8 @@ tmp_*.py
 quick_*.py
 fix_*.py
 test_*.py
+!tests/
+!tests/test_*.py
 check_*.py
 debug_*.py
 

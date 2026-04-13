@@ -1,0 +1,17 @@
+[build-system]
+requires = []
+build-backend = "xianyu_build_backend"
+backend-path = ["."]
+
+[project]
+name = "xianyu-cli"
+version = "0.1.0"
+description = "闲鱼管理系统 CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.25.0",
+]
+
+[project.scripts]
+xianyu = "xianyu_cli.main:main"

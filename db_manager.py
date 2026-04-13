@@ -758,6 +758,44 @@ class DBManager:
             )
             ''')
 
+            # 创建商品发布历史表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS product_publish_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                cookie_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                price REAL,
+                status TEXT NOT NULL DEFAULT 'failed',
+                error_message TEXT,
+                product_id TEXT,
+                product_url TEXT,
+                product_hash TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
+            )
+            ''')
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_product_publish_history_user_time ON product_publish_history(user_id, created_at DESC)")
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_product_publish_history_cookie_hash ON product_publish_history(cookie_id, product_hash)")
+
+            # 创建商品模板表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS product_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                category TEXT,
+                location TEXT,
+                description_template TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            ''')
+            self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_product_templates_user_updated ON product_templates(user_id, updated_at DESC)")
+
             # 创建好评模板表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS comment_templates (
@@ -9001,6 +9039,291 @@ Cookie数量: {cookie_count}
                 return cursor.rowcount > 0
             except Exception as e:
                 logger.error(f"更新任务执行结果失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def add_publish_history(
+        self,
+        user_id: int,
+        cookie_id: str,
+        title: str,
+        price: float = None,
+        status: str = 'failed',
+        error_message: str = None,
+        product_id: str = None,
+        product_url: str = None,
+        product_hash: str = None,
+    ) -> Optional[int]:
+        """记录商品发布历史。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    '''
+                    INSERT INTO product_publish_history (
+                        user_id, cookie_id, title, price, status,
+                        error_message, product_id, product_url, product_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        user_id,
+                        cookie_id,
+                        title,
+                        price,
+                        status,
+                        error_message,
+                        product_id,
+                        product_url,
+                        product_hash,
+                    ),
+                )
+                self.conn.commit()
+                return cursor.lastrowid
+            except Exception as e:
+                logger.error(f"记录商品发布历史失败: {e}")
+                self.conn.rollback()
+                return None
+
+    def save_published_product_with_hash(
+        self,
+        user_id: int,
+        cookie_id: str,
+        product_id: str,
+        product_url: str,
+        title: str,
+        price: float = None,
+        product_hash: str = None,
+    ) -> bool:
+        """保存已发布商品，并写入成功历史记录。"""
+        history_id = self.add_publish_history(
+            user_id=user_id,
+            cookie_id=cookie_id,
+            title=title,
+            price=price,
+            status='success',
+            error_message=None,
+            product_id=product_id,
+            product_url=product_url,
+            product_hash=product_hash,
+        )
+        return history_id is not None
+
+    def get_product_by_hash(self, cookie_id: str, product_hash: str) -> Optional[Dict[str, Any]]:
+        """按内容哈希查询最近一次成功发布的商品。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    '''
+                    SELECT cookie_id, title, price, product_id, product_url, product_hash, created_at
+                    FROM product_publish_history
+                    WHERE cookie_id = ? AND product_hash = ? AND status = 'success'
+                    ORDER BY datetime(created_at) DESC, id DESC
+                    LIMIT 1
+                    ''',
+                    (cookie_id, product_hash),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+
+                return {
+                    'cookie_id': row[0],
+                    'title': row[1],
+                    'price': row[2],
+                    'product_id': row[3],
+                    'product_url': row[4],
+                    'product_hash': row[5],
+                    'published_at': row[6],
+                }
+            except Exception as e:
+                logger.error(f"按哈希查询已发布商品失败: {e}")
+                return None
+
+    def get_publish_history(self, user_id: int, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+        """获取用户商品发布历史。"""
+        with self.lock:
+            try:
+                safe_limit = max(1, min(int(limit or 20), 100))
+                safe_offset = max(0, int(offset or 0))
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    '''
+                    SELECT id, user_id, cookie_id, title, price, status, error_message,
+                           product_id, product_url, product_hash, created_at, updated_at
+                    FROM product_publish_history
+                    WHERE user_id = ?
+                    ORDER BY datetime(created_at) DESC, id DESC
+                    LIMIT ? OFFSET ?
+                    ''',
+                    (user_id, safe_limit, safe_offset),
+                )
+                rows = cursor.fetchall()
+                history = []
+                for row in rows:
+                    history.append({
+                        'id': row[0],
+                        'user_id': row[1],
+                        'cookie_id': row[2],
+                        'title': row[3],
+                        'price': row[4],
+                        'status': row[5],
+                        'error_message': row[6],
+                        'product_id': row[7],
+                        'product_url': row[8],
+                        'product_hash': row[9],
+                        'published_at': row[10],
+                        'updated_at': row[11],
+                    })
+                return history
+            except Exception as e:
+                logger.error(f"获取商品发布历史失败: {e}")
+                return []
+
+    def get_publish_statistics(self, user_id: int) -> Dict[str, Any]:
+        """获取用户商品发布统计。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    '''
+                    SELECT
+                        COUNT(*) AS total_count,
+                        COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) AS success_count,
+                        COALESCE(SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END), 0) AS failed_count
+                    FROM product_publish_history
+                    WHERE user_id = ?
+                    ''',
+                    (user_id,),
+                )
+                row = cursor.fetchone() or (0, 0, 0)
+                total_count = int(row[0] or 0)
+                success_count = int(row[1] or 0)
+                failed_count = int(row[2] or 0)
+                success_rate = round((success_count / total_count) * 100, 1) if total_count > 0 else 0.0
+                return {
+                    'total': total_count,
+                    'success': success_count,
+                    'failed': failed_count,
+                    'success_rate': success_rate,
+                }
+            except Exception as e:
+                logger.error(f"获取商品发布统计失败: {e}")
+                return {
+                    'total': 0,
+                    'success': 0,
+                    'failed': 0,
+                    'success_rate': 0.0,
+                }
+
+    def get_product_templates(self, user_id: int) -> List[Dict[str, Any]]:
+        """获取用户商品模板列表。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    '''
+                    SELECT id, user_id, name, category, location, description_template, created_at, updated_at
+                    FROM product_templates
+                    WHERE user_id = ?
+                    ORDER BY datetime(updated_at) DESC, id DESC
+                    ''',
+                    (user_id,),
+                )
+                rows = cursor.fetchall()
+                templates = []
+                for row in rows:
+                    templates.append({
+                        'id': row[0],
+                        'user_id': row[1],
+                        'name': row[2],
+                        'category': row[3],
+                        'location': row[4],
+                        'description_template': row[5],
+                        'created_at': row[6],
+                        'updated_at': row[7],
+                    })
+                return templates
+            except Exception as e:
+                logger.error(f"获取商品模板失败: {e}")
+                return []
+
+    def create_product_template(
+        self,
+        user_id: int,
+        name: str,
+        category: str = None,
+        location: str = None,
+        description_template: str = None,
+    ) -> Optional[int]:
+        """创建商品模板。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    '''
+                    INSERT INTO product_templates (
+                        user_id, name, category, location, description_template
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ''',
+                    (user_id, name, category, location, description_template),
+                )
+                self.conn.commit()
+                return cursor.lastrowid
+            except Exception as e:
+                logger.error(f"创建商品模板失败: {e}")
+                self.conn.rollback()
+                return None
+
+    def update_product_template(
+        self,
+        template_id: int,
+        user_id: int,
+        name: str,
+        category: str = None,
+        location: str = None,
+        description_template: str = None,
+    ) -> bool:
+        """更新商品模板。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    '''
+                    UPDATE product_templates
+                    SET name = ?, category = ?, location = ?, description_template = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND user_id = ?
+                    ''',
+                    (name, category, location, description_template, template_id, user_id),
+                )
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"更新商品模板失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def delete_product_template(self, template_id: int, user_id: int) -> bool:
+        """删除商品模板。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._execute_sql(
+                    cursor,
+                    "DELETE FROM product_templates WHERE id = ? AND user_id = ?",
+                    (template_id, user_id),
+                )
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"删除商品模板失败: {e}")
                 self.conn.rollback()
                 return False
 

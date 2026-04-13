@@ -192,6 +192,43 @@ python Start.py
 
 > 本地运行请确保已安装 Node.js，否则 `PyExecJS` 相关功能无法正常使用。
 
+### 方式四：安装 CLI 并使用 `xianyu publish`
+
+```bash
+# 1. 在项目根目录安装 CLI
+pip install -e .
+
+# 2. 配置服务地址和后台 token
+export XIANYU_SERVER=http://127.0.0.1:8090
+export XIANYU_TOKEN=your-backend-token
+
+# 3. 发布商品
+xianyu publish \
+  --cookie-id account-a \
+  --title "iPhone 13 128G" \
+  --description "国行无锁，成色良好，支持当面验机" \
+  --price 2999 \
+  --image ./images/1.png \
+  --image ./images/2.png \
+  --category "数码产品/手机/苹果" \
+  --location "北京市/朝阳区"
+```
+
+如果不传 `--cookie-id`，CLI 会从已启动服务读取当前用户可用账号，并在终端中交互选择，支持一次选择多个账号。
+
+```bash
+xianyu publish \
+  --description "示例商品描述" \
+  --price 88 \
+  --image ./images/demo.png
+```
+
+说明：
+- 当前 CLI 首版只实现 `xianyu publish`
+- CLI 依赖服务已启动，不会自动拉起 `Start.py`
+- `--cookie-id` 可重复传入，未传时会进入账号选择交互
+- `--json` 可输出结构化结果，便于脚本调用
+
 ### 📋 环境要求
 
 - **Python**: 3.11+

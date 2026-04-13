@@ -1,0 +1,2 @@
+"""xianyu CLI package."""
+
