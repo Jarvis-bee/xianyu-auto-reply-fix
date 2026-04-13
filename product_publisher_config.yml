@@ -33,11 +33,12 @@ selectors:
       - '[data-testid="title-input"]'
   
   # 价格输入框（第一个 placeholder="0.00" 的输入框）
+  # 注意：2026-04 实测闲鱼页面有3个 0.00 输入框：价格、原价、邮费
+  # Playwright 的 :nth-of-type CSS 伪类不生效，改用 query_selector_all 取所有 ant-input
   price_input:
-    primary: 'input.ant-input[placeholder="0.00"]:nth-of-type(1)'
+    primary: 'input.ant-input[placeholder="0.00"]'
     fallback:
-      - 'input[placeholder="0.00"]:first-of-type'
-      - 'input.ant-input[placeholder="0.00"]'
+      - 'input[placeholder="0.00"]'
       - 'input[type="text"][placeholder="0.00"]'
       - 'input[placeholder*="价格"]'
       - 'input[name="price"]'
@@ -55,11 +56,11 @@ selectors:
       - '.description-textarea'
   
   # 原价输入框（第二个 placeholder="0.00" 的输入框）
+  # 注意：实际发布时按 query_selector_all 顺序取第 2 个即可
   original_price_input:
-    primary: 'input.ant-input[placeholder="0.00"]:nth-of-type(2)'
+    primary: 'input.ant-input[placeholder="0.00"]'
     fallback:
-      - 'input[placeholder="0.00"]:nth-of-type(2)'
-      - 'input[type="text"][placeholder="0.00"]:nth-of-type(2)'
+      - 'input[placeholder="0.00"]'
       - 'input[placeholder*="原价"]'
       - 'input[name="original_price"]'
       - '.original-price-input'
@@ -72,29 +73,29 @@ selectors:
       - 'button:has-text("选择分类")'
       - '.category-text'
   
-  # 位置选择器（宝贝所在地按钮）
+  # 位置选择器（点击打开地址选择器）
   location_selector:
-    primary: 'generic:has-text("五源河公寓A区")'
+    primary: 'div.addressWrap--qO_6KVXf'
     fallback:
-      - 'generic:near(text="宝贝所在地")'
-      - '.location-selector'
-      - '[data-testid="location-selector"]'
-      - 'button:has-text("位置")'
-  
-  # 位置输入框
+      - 'div.address--WJCNfSkh'
+      - '[class*="addressWrap"]'
+      - '[class*="address"]:has-text("请选择地址")'
+
+  # 位置输入框（地址选择器内的搜索框）
   location_input:
-    primary: 'input[placeholder*="位置"]'
+    primary: 'input.search-input--SkYFms8d'
     fallback:
-      - 'input[placeholder*="地址"]'
-      - 'input[name="location"]'
-      - '.location-input'
-  
-  # 位置结果项
+      - 'input[placeholder="搜索地点"]'
+      - 'input[placeholder*="搜索"]'
+      - '[class*="search-input"]'
+
+  # 位置结果项（2026-04 实测：class=addressItem--aP7Ndnv8）
   location_result_item:
-    primary: '.location-result-item:first-child'
+    primary: '.addressItem--aP7Ndnv8'
     fallback:
-      - '.location-item:first-child'
-      - '[data-testid="location-item"]:first-child'
+      - '[class*="addressItem--"]'
+      - '[class*="addressListItem"]'
+      - '[class*="addressItem"]'
   
   # 发布按钮（button "发布" ref=e140）
   publish_button:
