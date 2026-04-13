@@ -296,6 +296,7 @@ build/
 !CONTRIBUTING.md
 !SECURITY.md
 !LICENSE.md
+!skills/**/*.md
 !docs/*.md
 
 # 临时配置文件
