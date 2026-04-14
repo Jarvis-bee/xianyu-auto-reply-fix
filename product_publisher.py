@@ -30,6 +30,8 @@ from loguru import logger
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PlaywrightTimeoutError
 from dataclasses import dataclass
 
+from utils.publish_request_rewriter import PUBLISH_API_PATH, rewrite_publish_request_quantity
+
 
 @dataclass
 class ProductInfo:
@@ -41,6 +43,7 @@ class ProductInfo:
     category: Optional[str] = None  # 分类路径（如：数码产品/手机/苹果）
     location: Optional[str] = None  # 发货地（如：北京市/朝阳区）
     original_price: Optional[float] = None  # 原价
+    quantity: Optional[int] = None  # 无规格商品库存
 
 
 class PublisherConfig:
@@ -152,6 +155,7 @@ class XianyuProductPublisher:
 
     # 闲鱼发布页面 URL
     PUBLISH_URL = "https://www.goofish.com/publish"
+    PUBLISH_API_ROUTE = f"**{PUBLISH_API_PATH}**"
 
     def __init__(self, cookie_id: str, cookies_str: str, headless: bool = True, config_path: str = None):
         """初始化发布器
@@ -379,6 +383,158 @@ class XianyuProductPublisher:
         except Exception as e:
             logger.debug(f"【{self.cookie_id}】验证码检测失败: {e}")
             return False
+
+    async def _dismiss_quick_login_modal(self, modal_context: Optional[Dict[str, Any]] = None) -> bool:
+        """关闭或确认“快速进入”安全登录弹窗。"""
+        if not self.page:
+            return False
+
+        modal_context = modal_context or await self._find_quick_login_modal_context()
+        if not modal_context:
+            return False
+
+        quick_entry_selectors = [
+            'text="快速进入"',
+            'text="继续进入"',
+        ]
+        close_selectors = [
+            'button[aria-label="关闭"]',
+            'button:has-text("关闭")',
+            'text="×"',
+            '[class*="close"]',
+        ]
+
+        try:
+            for selector in quick_entry_selectors:
+                if await self._click_quick_login_control(modal_context, selector, success_log="尝试快速进入"):
+                    return True
+
+            for selector in close_selectors:
+                if await self._click_quick_login_control(modal_context, selector, success_log="尝试关闭弹窗"):
+                    return True
+        except Exception as e:
+            logger.debug(f"【{self.cookie_id}】处理安全登录弹窗失败: {e}")
+
+        return False
+
+    async def _find_quick_login_modal_context(self) -> Optional[Dict[str, Any]]:
+        if not self.page:
+            return None
+
+        modal_markers = [
+            'text="手机扫码安全登录"',
+            'text="快速进入"',
+            'text="其他账号登录"',
+        ]
+
+        for frame in self.page.frames:
+            for selector in modal_markers:
+                try:
+                    marker_element = await frame.query_selector(selector)
+                    if marker_element and await marker_element.is_visible():
+                        modal_container = await self._resolve_quick_login_modal_container(marker_element)
+                        return {
+                            'frame': frame,
+                            'container': modal_container,
+                        }
+                except Exception:
+                    continue
+        return None
+
+    async def _resolve_quick_login_modal_container(self, marker_element):
+        try:
+            container_handle = await marker_element.evaluate_handle("""
+                (node) => {
+                    const markerKeywords = ['手机扫码安全登录', '快速进入', '其他账号登录'];
+                    const actionKeywords = ['快速进入', '继续进入', '关闭', '×'];
+                    const roleMatches = new Set(['dialog', 'alertdialog']);
+                    const classPattern = /(modal|dialog|popup|overlay|mask|layer|panel|sheet|drawer)/i;
+
+                    const hasMarkerText = (el) => {
+                        const text = (el.innerText || el.textContent || '').trim();
+                        return markerKeywords.some((keyword) => text.includes(keyword));
+                    };
+
+                    const hasActionControl = (el) => {
+                        const candidates = el.querySelectorAll('button, [role="button"], [aria-label], [class]');
+                        return Array.from(candidates).some((candidate) => {
+                            const text = (candidate.innerText || candidate.textContent || '').trim();
+                            const ariaLabel = (candidate.getAttribute('aria-label') || '').trim();
+                            const className = String(candidate.className || '');
+                            const id = String(candidate.id || '');
+                            const meta = `${ariaLabel} ${className} ${id}`;
+                            return actionKeywords.some((keyword) => text.includes(keyword) || meta.includes(keyword))
+                                || /close/i.test(meta);
+                        });
+                    };
+
+                    let current = node instanceof Element ? node : node?.parentElement;
+                    while (current instanceof Element) {
+                        const role = (current.getAttribute('role') || '').toLowerCase();
+                        const ariaModal = (current.getAttribute('aria-modal') || '').toLowerCase();
+                        const classMeta = `${String(current.className || '')} ${String(current.id || '')}`;
+                        if (
+                            hasMarkerText(current)
+                            && (
+                                roleMatches.has(role)
+                                || ariaModal === 'true'
+                                || classPattern.test(classMeta)
+                                || hasActionControl(current)
+                            )
+                        ) {
+                            return current;
+                        }
+                        current = current.parentElement;
+                    }
+
+                    return node instanceof Element ? node.parentElement || node : null;
+                }
+            """)
+            return container_handle.as_element() or marker_element
+        except Exception:
+            return marker_element
+
+    async def _click_quick_login_control(self, modal_context: Dict[str, Any], selector: str, *, success_log: str) -> bool:
+        try:
+            modal_container = modal_context.get('container')
+            if not modal_container:
+                return False
+
+            element = await modal_container.query_selector(selector)
+            if not element or not await element.is_visible():
+                return False
+
+            logger.info(f"【{self.cookie_id}】检测到安全登录弹窗，{success_log}")
+            await element.click(force=True)
+
+            for _ in range(10):
+                await asyncio.sleep(0.3)
+                if not await self._quick_login_modal_still_visible(modal_context):
+                    return True
+        except Exception:
+            return False
+
+        return False
+
+    async def _quick_login_modal_still_visible(self, modal_context: Dict[str, Any]) -> bool:
+        modal_markers = [
+            'text="手机扫码安全登录"',
+            'text="快速进入"',
+            'text="其他账号登录"',
+        ]
+
+        modal_container = modal_context.get('container')
+        if not modal_container:
+            return False
+
+        for selector in modal_markers:
+            try:
+                element = await modal_container.query_selector(selector)
+                if element and await element.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def _handle_captcha(self) -> bool:
         """处理验证码
@@ -700,6 +856,7 @@ class XianyuProductPublisher:
         Returns:
             (是否发布成功, 商品ID, 商品URL)
         """
+        publish_route_guard: Optional[Dict[str, Any]] = None
         try:
             logger.info(f"【{self.cookie_id}】开始发布商品: {product.title}")
             self._emit_progress('publish_start', {'title': product.title})
@@ -722,6 +879,18 @@ class XianyuProductPublisher:
             if await self._check_captcha():
                 if not await self._handle_captcha():
                     await self.take_screenshot(product_title=f"{product.title}_captcha_failed")
+                    return (False, None, None)
+
+            quick_login_modal = await self._find_quick_login_modal_context()
+            if quick_login_modal and not await self._dismiss_quick_login_modal(quick_login_modal):
+                if await self._quick_login_modal_still_visible(quick_login_modal):
+                    logger.error(f"【{self.cookie_id}】安全登录弹窗未能关闭，已中止本次发布")
+                    await self.take_screenshot(product_title=f"{product.title}_quick_login_modal_blocked")
+                    self._emit_progress('publish_complete', {
+                        'status': 'failed',
+                        'title': product.title,
+                        'error': '安全登录弹窗未关闭'
+                    })
                     return (False, None, None)
 
             # 模拟人类行为
@@ -756,6 +925,9 @@ class XianyuProductPublisher:
                 if not await self._set_location(product.location):
                     logger.warning(f"【{self.cookie_id}】位置设置失败，继续...")
 
+            if product.quantity is not None:
+                publish_route_guard = await self._install_publish_quantity_override(product.quantity)
+
             # 点击发布按钮
             self._emit_progress('publishing', {'status': 'clicking'})
             if not await self._click_publish():
@@ -765,6 +937,27 @@ class XianyuProductPublisher:
 
             # 验证发布成功
             success, product_id, product_url = await self._verify_publish_success()
+
+            if publish_route_guard:
+                route_state = publish_route_guard['state']
+                if route_state.get('error'):
+                    logger.error(f"【{self.cookie_id}】库存改写失败，已中止发布请求: {route_state['error']}")
+                    await self.take_screenshot(product_title=f"{product.title}_quantity_override_failed")
+                    self._emit_progress('publish_complete', {
+                        'status': 'failed',
+                        'title': product.title,
+                        'error': route_state['error']
+                    })
+                    return (False, None, None)
+                if not route_state['rewritten']:
+                    logger.error(f"【{self.cookie_id}】已请求库存覆盖，但发布请求未命中改写逻辑，已将本次发布判定为失败")
+                    await self.take_screenshot(product_title=f"{product.title}_quantity_override_missed")
+                    self._emit_progress('publish_complete', {
+                        'status': 'failed',
+                        'title': product.title,
+                        'error': '发布请求未命中库存改写逻辑'
+                    })
+                    return (False, None, None)
 
             if success:
                 logger.info(f"【{self.cookie_id}】商品发布成功: {product.title}, ID: {product_id}")
@@ -791,6 +984,9 @@ class XianyuProductPublisher:
             await self.take_screenshot(product_title=f"{product.title}_exception")
             self._emit_progress('publish_complete', {'status': 'error', 'title': product.title, 'error': str(e)})
             return (False, None, None)
+        finally:
+            if publish_route_guard:
+                await self._remove_publish_quantity_override(publish_route_guard)
 
     async def _upload_images(self, image_paths: List[str]) -> bool:
         """上传商品图片
@@ -816,6 +1012,33 @@ class XianyuProductPublisher:
                     continue
 
                 try:
+                    # 方法0: 优先点击“添加首图/添加图片”按钮，等待文件选择器
+                    upload_button = await self._find_element_with_fallback('image_upload_button', timeout=2000)
+                    if upload_button:
+                        try:
+                            await self._simulate_mouse_movement(upload_button)
+                            async with self.page.expect_file_chooser(timeout=3000) as chooser_info:
+                                await upload_button.click()
+                            file_chooser = await chooser_info.value
+                            await file_chooser.set_files(os.path.abspath(img_path))
+                            uploaded_count += 1
+                            uploaded_images.append(img_path)
+                            logger.info(f"【{self.cookie_id}】通过上传按钮已上传第 {uploaded_count}/{len(image_paths)} 张图片")
+                        except Exception as chooser_error:
+                            logger.debug(f"【{self.cookie_id}】上传按钮未触发文件选择器，尝试其他上传方式: {chooser_error}")
+
+                    if img_path in uploaded_images:
+                        self._emit_progress('upload_images', {
+                            'status': 'uploading',
+                            'current': uploaded_count,
+                            'total': len(image_paths)
+                        })
+                        await asyncio.sleep(random.uniform(
+                            self.config.get('delays', 'image_upload_min', default=0.5),
+                            self.config.get('delays', 'image_upload_max', default=1.5)
+                        ))
+                        continue
+
                     # 方法1: 尝试查找隐藏的 file input 并直接上传
                     upload_input = await self._find_element_with_fallback('image_upload_input', timeout=2000)
                     if upload_input:
@@ -1170,6 +1393,83 @@ class XianyuProductPublisher:
         except Exception as e:
             logger.error(f"【{self.cookie_id}】位置设置失败: {e}")
             return False
+
+    async def _install_publish_quantity_override(self, quantity: int) -> Dict[str, Any]:
+        """在发布请求发出前写入 quantity 并同步重算 sign。"""
+        if not self.page:
+            raise RuntimeError("页面未初始化，无法设置发布请求拦截")
+
+        normalized_quantity = int(quantity)
+        if normalized_quantity < 1:
+            raise ValueError("quantity 必须大于 0")
+
+        route_state = {'matched': False, 'rewritten': False, 'error': None}
+
+        async def route_handler(route, request):
+            route_state['matched'] = True
+            try:
+                token = await self._get_runtime_mtop_token()
+                rewritten_url, rewritten_post_data = rewrite_publish_request_quantity(
+                    request.url,
+                    request.post_data or "",
+                    normalized_quantity,
+                    token=token,
+                )
+                route_state['rewritten'] = True
+                logger.info(f"【{self.cookie_id}】发布请求 quantity 已改写为 {normalized_quantity}")
+                await route.continue_(url=rewritten_url, post_data=rewritten_post_data)
+            except Exception as e:
+                route_state['error'] = str(e)
+                logger.warning(f"【{self.cookie_id}】发布请求 quantity 改写失败，已中止原始请求: {e}")
+                await route.abort()
+
+        await self.page.route(self.PUBLISH_API_ROUTE, route_handler)
+        return {'handler': route_handler, 'state': route_state}
+
+    async def _remove_publish_quantity_override(self, route_guard: Dict[str, Any]):
+        if not self.page:
+            return
+
+        route_handler = route_guard.get('handler')
+        if not route_handler:
+            return
+
+        try:
+            await self.page.unroute(self.PUBLISH_API_ROUTE, route_handler)
+        except Exception as e:
+            logger.debug(f"【{self.cookie_id}】移除发布请求拦截失败: {e}")
+
+    async def _get_runtime_mtop_token(self) -> str:
+        cookies = self._parse_cookie_string(self.cookies_str)
+
+        if self.context:
+            try:
+                for cookie in await self.context.cookies():
+                    cookie_name = str(cookie.get('name') or '').strip()
+                    if not cookie_name:
+                        continue
+                    cookies[cookie_name] = str(cookie.get('value') or '')
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】读取浏览器上下文 Cookie 失败，回退到缓存 Cookie: {e}")
+
+        token_value = str(cookies.get('_m_h5_tk') or '').split('_', 1)[0].strip()
+        if not token_value:
+            raise ValueError("运行时 Cookie 中缺少 _m_h5_tk")
+        return token_value
+
+    @staticmethod
+    def _parse_cookie_string(cookies_str: str) -> Dict[str, str]:
+        cookies: Dict[str, str] = {}
+        for item in str(cookies_str or '').split(';'):
+            cookie = item.strip()
+            if not cookie or '=' not in cookie:
+                continue
+            key, value = cookie.split('=', 1)
+            key = key.strip()
+            if not key:
+                continue
+            cookies[key] = value.strip()
+        return cookies
 
     async def _click_publish(self) -> bool:
         """点击发布按钮

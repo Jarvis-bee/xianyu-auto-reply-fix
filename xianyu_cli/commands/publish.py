@@ -28,6 +28,7 @@ def register(subparsers: Any) -> None:
     parser.add_argument("--category", help="商品分类路径，例如 数码产品/手机/苹果")
     parser.add_argument("--location", help="发货地，例如 北京市/朝阳区")
     parser.add_argument("--original-price", type=float, dest="original_price", help="商品原价")
+    parser.add_argument("--quantity", type=int, help="无规格商品库存，必须大于 0")
     parser.add_argument("--server", help="服务地址，默认读取 XIANYU_SERVER 或 http://127.0.0.1:8090")
     parser.add_argument("--token", help="后台 Bearer token，默认读取 XIANYU_TOKEN")
     parser.add_argument("--json", action="store_true", dest="json_output", help="以 JSON 输出执行结果")
@@ -58,6 +59,10 @@ def handle_publish(
             args.original_price,
             field_name="商品原价",
         )
+        quantity = _validate_optional_positive_int(
+            getattr(args, "quantity", None),
+            field_name="商品库存",
+        )
 
         with client_factory(server, token) as client:
             client.check_health()
@@ -78,6 +83,7 @@ def handle_publish(
                 category=category,
                 location=location,
                 original_price=original_price,
+                quantity=quantity,
             )
     except (CLIUsageError, APIClientError, ValueError) as exc:
         return _emit_fatal_error(str(exc), json_output=bool(args.json_output), stdout=stdout, stderr=stderr)
@@ -123,6 +129,16 @@ def _validate_optional_non_negative_number(value: float | None, *, field_name: s
     if value is None:
         return None
     return _validate_non_negative_number(value, field_name=field_name)
+
+
+def _validate_optional_positive_int(value: int | None, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+
+    numeric_value = int(value)
+    if numeric_value < 1:
+        raise CLIUsageError(f"{field_name}必须大于 0")
+    return numeric_value
 
 
 def _prepare_publish_images(client: APIClient, raw_images: Sequence[str] | None) -> list[str]:
@@ -216,6 +232,7 @@ def _publish_to_cookies(
     category: str | None,
     location: str | None,
     original_price: float | None,
+    quantity: int | None,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
 
@@ -229,6 +246,7 @@ def _publish_to_cookies(
             "category": category,
             "location": location,
             "original_price": original_price,
+            "quantity": quantity,
         }
 
         try:

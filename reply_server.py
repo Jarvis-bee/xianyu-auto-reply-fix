@@ -2472,6 +2472,7 @@ class PublishProductPayload(BaseModel):
     category: Optional[str] = None
     location: Optional[str] = None
     original_price: Optional[float] = None
+    quantity: Optional[Any] = None
 
 
 class PublishBatchProductsPayload(BaseModel):
@@ -2491,6 +2492,32 @@ def _normalize_publish_title(raw_title: Optional[str]) -> Optional[str]:
     return title or None
 
 
+def _normalize_publish_quantity(raw_quantity: Optional[Any]) -> Optional[int]:
+    if raw_quantity is None:
+        return None
+
+    if isinstance(raw_quantity, bool):
+        raise HTTPException(status_code=400, detail="库存 quantity 必须是正整数")
+
+    if isinstance(raw_quantity, int):
+        quantity = raw_quantity
+    elif isinstance(raw_quantity, float):
+        if not raw_quantity.is_integer():
+            raise HTTPException(status_code=400, detail="库存 quantity 必须是正整数")
+        quantity = int(raw_quantity)
+    elif isinstance(raw_quantity, str):
+        cleaned_quantity = raw_quantity.strip()
+        if not cleaned_quantity or not re.fullmatch(r'\d+', cleaned_quantity):
+            raise HTTPException(status_code=400, detail="库存 quantity 必须是正整数")
+        quantity = int(cleaned_quantity)
+    else:
+        raise HTTPException(status_code=400, detail="库存 quantity 必须是正整数")
+
+    if quantity < 1:
+        raise HTTPException(status_code=400, detail="库存 quantity 必须大于 0")
+    return quantity
+
+
 def _build_publish_history_title(raw_title: Optional[str], raw_description: str) -> str:
     title = (raw_title or '').strip()
     if title:
@@ -2508,6 +2535,7 @@ def _build_publish_product_hash(
     original_price: Optional[float] = None,
     category: Optional[str] = None,
     location: Optional[str] = None,
+    quantity: Optional[int] = None,
 ) -> str:
     fingerprint = {
         'title': title or '',
@@ -2518,6 +2546,9 @@ def _build_publish_product_hash(
         'category': (category or '').strip(),
         'location': (location or '').strip(),
     }
+    # 历史记录中默认库存 1 没有写入哈希；显式传 1 需要保持兼容。
+    if quantity not in (None, 1):
+        fingerprint['quantity'] = quantity
     content = json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
@@ -8324,6 +8355,7 @@ async def publish_product(
     """发布单个商品到闲鱼。"""
     cookie_id = _ensure_cookie_access(body.cookie_id, current_user)
     publish_title = _normalize_publish_title(body.title)
+    publish_quantity = _normalize_publish_quantity(body.quantity)
     record_title = _build_publish_history_title(publish_title, body.description)
     user_id = current_user['user_id']
 
@@ -8337,6 +8369,7 @@ async def publish_product(
         original_price=body.original_price,
         category=body.category,
         location=body.location,
+        quantity=publish_quantity,
     )
 
     existing_product = db_manager.get_product_by_hash(cookie_id, product_hash)
@@ -8383,6 +8416,7 @@ async def publish_product(
             category=body.category,
             location=body.location,
             original_price=body.original_price,
+            quantity=publish_quantity,
         )
 
         success, product_id, product_url = await publisher.publish_product(product)
@@ -8471,6 +8505,7 @@ async def batch_publish_products(
             record_title = _build_publish_history_title(publish_title, product_data.description)
             product_hash = None
             try:
+                publish_quantity = _normalize_publish_quantity(product_data.quantity)
                 image_paths = _resolve_publish_image_paths(product_data.images)
                 image_fingerprints = _build_publish_image_fingerprints(image_paths)
                 product_hash = _build_publish_product_hash(
@@ -8481,6 +8516,7 @@ async def batch_publish_products(
                     original_price=product_data.original_price,
                     category=product_data.category,
                     location=product_data.location,
+                    quantity=publish_quantity,
                 )
 
                 existing_product = db_manager.get_product_by_hash(cookie_id, product_hash)
@@ -8515,6 +8551,7 @@ async def batch_publish_products(
                     category=product_data.category,
                     location=product_data.location,
                     original_price=product_data.original_price,
+                    quantity=publish_quantity,
                 )
                 success, product_id, product_url = await publisher.publish_product(product)
 

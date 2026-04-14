@@ -208,6 +208,7 @@ xianyu publish \
   --title "iPhone 13 128G" \
   --description "国行无锁，成色良好，支持当面验机" \
   --price 2999 \
+  --quantity 5 \
   --image ./images/1.png \
   --image ./images/2.png \
   --category "数码产品/手机/苹果" \
@@ -224,9 +225,10 @@ xianyu publish \
 ```
 
 说明：
-- 当前 CLI 首版只实现 `xianyu publish`
+- 当前 CLI 已支持 `xianyu publish`、`xianyu card`、`xianyu delivery-rule`
 - CLI 依赖服务已启动，不会自动拉起 `Start.py`
 - `--cookie-id` 可重复传入，未传时会进入账号选择交互
+- `--quantity` 可为无规格商品传递库存，必须大于 `0`
 - `--json` 可输出结构化结果，便于脚本调用
 
 ### 📋 环境要求

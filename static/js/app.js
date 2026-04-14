@@ -20310,6 +20310,8 @@ async function submitProductPublishForm(event) {
     const cookieId = document.getElementById('productPublishCookieId')?.value || '';
     const description = document.getElementById('productPublishDescription')?.value.trim() || '';
     const price = parseFloat(document.getElementById('productPublishPrice')?.value || '');
+    const quantityRaw = document.getElementById('productPublishQuantity')?.value.trim() || '';
+    const quantity = quantityRaw ? Number(quantityRaw) : undefined;
 
     if (!cookieId) {
         showToast('请选择发布账号', 'warning');
@@ -20321,6 +20323,10 @@ async function submitProductPublishForm(event) {
     }
     if (!Number.isFinite(price) || price < 0) {
         showToast('请填写有效的售价', 'warning');
+        return;
+    }
+    if (quantityRaw && (!Number.isFinite(quantity) || !Number.isInteger(quantity) || quantity < 1)) {
+        showToast('库存必须是大于 0 的整数', 'warning');
         return;
     }
     if (!productPublishState.singleImages.length) {
@@ -20345,7 +20351,8 @@ async function submitProductPublishForm(event) {
             location: document.getElementById('productPublishLocation')?.value.trim() || undefined,
             original_price: document.getElementById('productPublishOriginalPrice')?.value
                 ? parseFloat(document.getElementById('productPublishOriginalPrice').value)
-                : undefined
+                : undefined,
+            quantity
         };
 
         const result = await fetchJSON(`${apiBase}/api/products/publish`, {

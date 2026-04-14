@@ -30,7 +30,7 @@ Build or extend the repository's local `xianyu` command without coupling the CLI
 - Keep `card` as a thin client over `/cards` and `/upload-image`.
 - Keep `delivery-rule` as a thin client over `/delivery-rules` and `/delivery-rules/stats`.
 - Preserve current UX unless the task explicitly changes it:
-  `publish` uses optional repeatable `--cookie-id` with interactive cookie multi-select only when omitted; `delivery-rule create` uses optional `--card-id` with interactive card single-select only when omitted.
+  `publish` uses optional repeatable `--cookie-id` with interactive cookie multi-select only when omitted, and supports optional `--quantity` for no-spec inventory; `delivery-rule create` uses optional `--card-id` with interactive card single-select only when omitted.
 - Preserve scriptability:
   human-readable output by default, machine-readable JSON with `--json`, and no prompt text on `stdout` during JSON mode.
 

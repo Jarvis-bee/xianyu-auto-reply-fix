@@ -82,6 +82,7 @@ class PublishCLITests(unittest.TestCase):
                 parser.parse_args(["publish", "--help"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--cookie-id", stdout.getvalue())
+        self.assertIn("--quantity", stdout.getvalue())
 
     def test_parse_cookie_selection_space_separated(self) -> None:
         self.assertEqual(parse_cookie_selection("1 3 3 2", 3), [1, 3, 2])
@@ -233,6 +234,38 @@ class PublishCLITests(unittest.TestCase):
         self.assertEqual(len(client.publish_calls), 1)
         self.assertEqual(client.publish_calls[0]["price"], 0.0)
         self.assertEqual(client.publish_calls[0]["original_price"], 0.0)
+
+    def test_publish_forwards_quantity_when_provided(self) -> None:
+        image_path = self._create_temp_image()
+        args = Namespace(
+            cookie_ids=["cookie-a"],
+            title="测试标题",
+            description="测试描述",
+            price=10.0,
+            images=[image_path],
+            category=None,
+            location=None,
+            original_price=None,
+            quantity=5,
+            server=None,
+            token="test-token",
+            json_output=False,
+        )
+        client = FakeClient("http://127.0.0.1:8090", "Bearer test-token")
+        client.publish_responses = {
+            "cookie-a": {"success": True, "message": "商品发布成功", "product_id": "1001"},
+        }
+
+        exit_code = handle_publish(
+            args,
+            client_factory=FakeClientFactory(client),
+            stdin=FakeStdin("", interactive=False),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(client.publish_calls[0]["quantity"], 5)
 
     def test_publish_uploads_local_images_to_server_before_publish(self) -> None:
         image_path = self._create_temp_image()

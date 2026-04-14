@@ -34,7 +34,7 @@ All subcommands support:
 ### Arguments
 
 - Required: `--description`, `--price`, `--image` (repeatable)
-- Optional: `--cookie-id` (repeatable), `--title`, `--category`, `--location`, `--original-price`, `--server`, `--token`, `--json`
+- Optional: `--cookie-id` (repeatable), `--title`, `--category`, `--location`, `--original-price`, `--quantity`, `--server`, `--token`, `--json`
 
 ### Resolution Rules
 
@@ -58,6 +58,12 @@ All subcommands support:
 - `POST /api/products/publish`
 
 When behavior changes, inspect the matching handlers in `reply_server.py`.
+
+### Publish Payload Notes
+
+- `--quantity` is optional and is only intended for no-spec products
+- CLI forwards `quantity` unchanged to `/api/products/publish`
+- Backend rejects `quantity <= 0`
 
 ### Multi-Account Semantics
 
