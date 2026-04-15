@@ -269,6 +269,20 @@ class XianyuProductPublisher:
             logger.warning(f"【{self.cookie_id}】选择器配置不存在: {selector_key}")
             return None
 
+        match_index = selector_config.get('match_index')
+        if match_index is not None:
+            try:
+                match_index = int(match_index)
+            except (TypeError, ValueError):
+                logger.warning(f"【{self.cookie_id}】选择器 match_index 配置无效: {selector_key}={match_index}")
+                match_index = None
+            else:
+                if match_index < 0:
+                    logger.warning(f"【{self.cookie_id}】选择器 match_index 不能小于 0: {selector_key}={match_index}")
+                    match_index = None
+
+        visible_only = bool(selector_config.get('visible_only', match_index is not None))
+
         # 尝试主选择器
         primary_selector = selector_config.get('primary')
         if primary_selector:
@@ -276,7 +290,12 @@ class XianyuProductPublisher:
                 if self.config.get('logging', 'log_selector_search', default=True):
                     logger.debug(f"【{self.cookie_id}】尝试主选择器: {primary_selector}")
 
-                element = await self.page.wait_for_selector(primary_selector, timeout=timeout)
+                element = await self._find_matching_element(
+                    primary_selector,
+                    timeout=timeout,
+                    match_index=match_index,
+                    visible_only=visible_only,
+                )
                 if element:
                     logger.debug(f"【{self.cookie_id}】主选择器找到元素: {primary_selector}")
                     return element
@@ -292,7 +311,12 @@ class XianyuProductPublisher:
                 if self.config.get('logging', 'log_selector_search', default=True):
                     logger.debug(f"【{self.cookie_id}】尝试备选选择器 {i+1}: {fallback_selector}")
 
-                element = await self.page.wait_for_selector(fallback_selector, timeout=timeout)
+                element = await self._find_matching_element(
+                    fallback_selector,
+                    timeout=timeout,
+                    match_index=match_index,
+                    visible_only=visible_only,
+                )
                 if element:
                     logger.info(f"【{self.cookie_id}】备选选择器 {i+1} 找到元素: {fallback_selector}")
                     return element
@@ -303,6 +327,41 @@ class XianyuProductPublisher:
 
         logger.warning(f"【{self.cookie_id}】所有选择器均未找到元素: {selector_key}")
         return None
+
+    async def _find_matching_element(
+        self,
+        selector: str,
+        *,
+        timeout: int,
+        match_index: Optional[int] = None,
+        visible_only: bool = False,
+    ) -> Optional[Any]:
+        """按选择器查找元素，必要时返回第 N 个可见匹配项。"""
+        if match_index is None:
+            return await self.page.wait_for_selector(selector, timeout=timeout)
+
+        await self.page.wait_for_selector(selector, timeout=timeout)
+        matched_elements = await self.page.query_selector_all(selector)
+        if not matched_elements:
+            return None
+
+        candidates = matched_elements
+        if visible_only:
+            candidates = []
+            for element in matched_elements:
+                try:
+                    if await element.is_visible():
+                        candidates.append(element)
+                except Exception as exc:
+                    logger.debug(f"【{self.cookie_id}】判断元素可见性失败: {selector}, 错误: {exc}")
+
+        if match_index >= len(candidates):
+            logger.warning(
+                f"【{self.cookie_id}】选择器匹配数量不足: {selector}, 需要第 {match_index + 1} 个，实际 {len(candidates)} 个"
+            )
+            return None
+
+        return candidates[match_index]
 
     async def _simulate_mouse_movement(self, target_element=None):
         """模拟鼠标移动

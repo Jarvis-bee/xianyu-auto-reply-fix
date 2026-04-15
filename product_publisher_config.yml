@@ -33,10 +33,12 @@ selectors:
       - '[data-testid="title-input"]'
   
   # 价格输入框（第一个 placeholder="0.00" 的输入框）
-  # 注意：2026-04 实测闲鱼页面有3个 0.00 输入框：价格、原价、邮费
-  # Playwright 的 :nth-of-type CSS 伪类不生效，改用 query_selector_all 取所有 ant-input
+  # 注意：2026-04 实测闲鱼页面有多个 0.00 输入框：价格、原价、隐藏输入
+  # 这里必须显式取第 1 个可见输入框，避免和原价复用同一个元素
   price_input:
     primary: 'input.ant-input[placeholder="0.00"]'
+    match_index: 0
+    visible_only: true
     fallback:
       - 'input[placeholder="0.00"]'
       - 'input[type="text"][placeholder="0.00"]'
@@ -56,9 +58,11 @@ selectors:
       - '.description-textarea'
   
   # 原价输入框（第二个 placeholder="0.00" 的输入框）
-  # 注意：实际发布时按 query_selector_all 顺序取第 2 个即可
+  # 这里必须显式取第 2 个可见输入框，避免覆盖现价
   original_price_input:
     primary: 'input.ant-input[placeholder="0.00"]'
+    match_index: 1
+    visible_only: true
     fallback:
       - 'input[placeholder="0.00"]'
       - 'input[placeholder*="原价"]'
