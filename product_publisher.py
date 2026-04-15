@@ -1192,27 +1192,24 @@ class XianyuProductPublisher:
                     await self._random_delay()
                     logger.debug(f"【{self.cookie_id}】标题已填写")
 
-            # 填写描述（可能是 contenteditable 元素）
+            # 填写描述（contenteditable 元素，需要逐行输入以保留换行）
             desc_element = await self._find_element_with_fallback('description_textarea')
             if desc_element:
                 await self._simulate_mouse_movement(desc_element)
+                await desc_element.click()
+                await self._random_delay(0.3, 0.6)
 
-                # 尝试使用 fill 方法
-                try:
-                    await desc_element.fill(product.description)
-                except Exception as e:
-                    # 如果 fill 失败，尝试使用 JavaScript 设置内容
-                    logger.debug(f"【{self.cookie_id}】fill 方法失败，尝试 JavaScript: {e}")
-                    await desc_element.click()
-                    await self.page.evaluate(f"""
-                        (element) => {{
-                            element.textContent = {repr(product.description)};
-                            element.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        }}
-                    """, desc_element)
+                # 按行拆分，逐行输入，行间按 Enter 换行
+                lines = product.description.split('\n')
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        await self.page.keyboard.type(line, delay=15)
+                    if i < len(lines) - 1:
+                        await self.page.keyboard.press('Enter')
+                        await asyncio.sleep(0.1)
 
                 await self._random_delay()
-                logger.debug(f"【{self.cookie_id}】描述已填写")
+                logger.debug(f"【{self.cookie_id}】描述已填写（逐行输入，{len(lines)} 行）")
             else:
                 logger.error(f"【{self.cookie_id}】未找到描述输入框")
                 return False
